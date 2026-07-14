@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "mpq-parser"
-version = "0.1.0"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02b40d12ecda7086590d8317b2cdf77a4a63e233cc2599514373c9be9da7a763"
+checksum = "f1f995c823dc4e7883437db59bcf90d86a9d47886fc5d8a848206c1de35c6cb2"
 dependencies = [
  "thiserror",
 ]
