@@ -1,4 +1,4 @@
-use sc2reader_rs::mpq::{MpqHeader, MpqUserDataHeader};
+use mpq_parser::{MpqHeader, MpqUserDataHeader};
 use std::fs::read;
 
 fn main() {
