@@ -18,7 +18,7 @@ fn decode_player(bytes: &[u8], pos: &mut usize) -> Player {
         _ => skip_value(b, p).unwrap(),
     });
 
-    Player::new(&name, race)
+    Player::new(&name, &race)
 }
 
 pub fn decode_replay_details(bytes: &[u8]) -> ReplayDetails {

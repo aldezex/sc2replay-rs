@@ -7,10 +7,10 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(name: &str, race: String) -> Self {
+    pub fn new(name: &str, race: &str) -> Self {
         Player {
-            name: format_display_name(&name),
-            race,
+            name: format_display_name(name),
+            race: race.to_string(),
         }
     }
 }
