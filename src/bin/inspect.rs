@@ -38,5 +38,31 @@ fn main() {
         mpq_parser::crypto::decrypt(block_table_raw_bytes, block_table_key, &crypt_table);
     let block_table_result = mpq_parser::block::parse_block_table_entries(&block_table_decrypt);
 
-    println!("{:?}", block_table_result);
+    let details_block = mpq_parser::archive::find_file(
+        "replay.details",
+        &entries,
+        &block_table_result,
+        &crypt_table,
+    )
+    .expect("replay.details not found");
+
+    let file_contents = mpq_parser::archive::extract_file(&replay, offset as u32, *details_block)
+        .expect("couldn't extract file");
+
+    println!("{} bytes extracted", file_contents.len());
+    println!("{:?}", &file_contents[..50.min(file_contents.len())]);
+
+    let tracker_block = mpq_parser::archive::find_file(
+        "replay.tracker.events",
+        &entries,
+        &block_table_result,
+        &crypt_table,
+    )
+    .expect("replay.tracker.events not found");
+
+    let tracker_contents =
+        mpq_parser::archive::extract_file(&replay, offset as u32, *tracker_block)
+            .expect("couldn't extract file");
+
+    println!("{} bytes extracted (tracker)", tracker_contents.len());
 }
