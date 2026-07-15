@@ -1,3 +1,9 @@
+/// Reads a variable-length signed integer (`vint`) from `bytes` starting
+/// at `*pos`, advancing `*pos` past the bytes consumed.
+///
+/// Encoding: the first byte holds the sign in bit 0 and 6 data bits in
+/// bits 1-6. If bit 7 is set, another byte follows, contributing 7 more
+/// data bits each time, until a byte with bit 7 unset is read.
 pub fn read_vint(bytes: &[u8], pos: &mut usize) -> i64 {
     let mut b0 = next_byte(bytes, pos) as u64;
     let is_negative = (b0 & 1) == 1;
@@ -17,13 +23,16 @@ pub fn read_vint(bytes: &[u8], pos: &mut usize) -> i64 {
     }
 }
 
+/// Reads a single byte from `bytes` at `*pos`, advancing `*pos` by one.
 fn next_byte(bytes: &[u8], pos: &mut usize) -> u8 {
     let byte = bytes[*pos];
     *pos += 1;
     byte
 }
 
-fn read_blob<'a>(bytes: &'a [u8], pos: &mut usize) -> &'a [u8] {
+/// Reads a length-prefixed blob (`0x02` tag + vint length + raw bytes).
+pub fn read_blob<'a>(bytes: &'a [u8], pos: &mut usize) -> &'a [u8] {
+    let _tag = next_byte(bytes, pos);
     let long = read_vint(bytes, pos) as usize;
     let start = *pos;
     let res = &bytes[start..start + long];
@@ -31,11 +40,15 @@ fn read_blob<'a>(bytes: &'a [u8], pos: &mut usize) -> &'a [u8] {
     res
 }
 
+/// Reads an optional value (`0x04` tag + presence byte + inner value).
+///
+/// Calls `read_inner` at most once, only if the presence byte is nonzero.
 pub fn read_optional<T>(
     bytes: &[u8],
     pos: &mut usize,
     read_inner: impl FnOnce(&[u8], &mut usize) -> T,
 ) -> Option<T> {
+    let _tag = next_byte(bytes, pos);
     let present = next_byte(bytes, pos);
 
     if present != 0 {
@@ -45,11 +58,14 @@ pub fn read_optional<T>(
     }
 }
 
-fn read_array<T>(
+/// Reads a length-prefixed array (`0x00` tag + vint length + N elements),
+/// calling `read_inner` once per element.
+pub fn read_array<T>(
     bytes: &[u8],
     pos: &mut usize,
     mut read_inner: impl FnMut(&[u8], &mut usize) -> T,
 ) -> Vec<T> {
+    let _tag = next_byte(bytes, pos);
     let long = read_vint(bytes, pos);
     let mut res = Vec::new();
 
@@ -60,7 +76,14 @@ fn read_array<T>(
     res
 }
 
-fn read_struct(bytes: &[u8], pos: &mut usize, mut on_field: impl FnMut(&[u8], &mut usize, i64)) {
+/// Reads a struct (`0x05` tag + vint field count + N (field_index, value)
+/// pairs), calling `on_field` once per field with its index so the caller
+/// can decide how to decode each one.
+pub fn read_struct(
+    bytes: &[u8],
+    pos: &mut usize,
+    mut on_field: impl FnMut(&[u8], &mut usize, i64),
+) {
     let _tag = next_byte(bytes, pos);
     let num_fields = read_vint(bytes, pos);
 
@@ -84,35 +107,50 @@ mod tests {
 
     #[test]
     fn reads_blob() {
-        let bytes = [0x04, 0x41, 0x42];
+        // tag(blob), vint(2), 'A', 'B'
+        let bytes = [0x02, 0x04, 0x41, 0x42];
         let mut pos = 0;
 
         let result = read_blob(&bytes, &mut pos);
 
         assert_eq!(result, [0x41, 0x42]);
-        assert_eq!(pos, 3);
+        assert_eq!(pos, 4);
+    }
+
+    #[test]
+    fn reads_array() {
+        // tag(array), vint(2), 'A', 'B'
+        let bytes = [0x00, 0x04, 0x41, 0x42];
+        let mut pos = 0;
+
+        let result = read_array(&bytes, &mut pos, |b, p| next_byte(b, p));
+
+        assert_eq!(result, vec![0x41, 0x42]);
+        assert_eq!(pos, 4);
     }
 
     #[test]
     fn reads_optional_present() {
-        let bytes = [0x01, 0x2A];
+        // tag(optional), present=1, value
+        let bytes = [0x04, 0x01, 0x2A];
         let mut pos = 0;
 
         let value = read_optional(&bytes, &mut pos, |b, p| next_byte(b, p));
 
         assert_eq!(value, Some(0x2A));
-        assert_eq!(pos, 2);
+        assert_eq!(pos, 3);
     }
 
     #[test]
     fn reads_optional_absent() {
-        let bytes = [0x00];
+        // tag(optional), present=0
+        let bytes = [0x04, 0x00];
         let mut pos = 0;
 
         let value: Option<u8> = read_optional(&bytes, &mut pos, |b, p| next_byte(b, p));
 
         assert_eq!(value, None);
-        assert_eq!(pos, 1);
+        assert_eq!(pos, 2);
     }
 
     #[test]
