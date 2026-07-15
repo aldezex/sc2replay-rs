@@ -1,5 +1,17 @@
+//! Decoding primitives for SC2's "versioned" protocol encoding
+//! (`VersionedDecoder` in Blizzard's reference implementation).
+//!
+//! Every value in this format is prefixed by a one-byte tag identifying
+//! its type at runtime, which is what allows a decoder to skip unknown
+//! or newer fields ([`skip_value`]) without knowing the exact struct
+//! layout of every protocol version in advance.
+
+/// Errors that can occur while decoding the SC2 "versioned" protocol
+/// format (used by `replay.details` and `replay.tracker.events`).
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
+    /// A value's type tag didn't match any of the known encodings
+    /// (array, blob, optional, struct, or fixed-width int/vint).
     #[error("unsupported tag {tag:#04x} at position {pos}")]
     UnsupportedTag { tag: u8, pos: usize },
 }
@@ -99,6 +111,18 @@ pub fn read_struct(
     }
 }
 
+/// Skips over a single tagged value of any recognized type, advancing
+/// `*pos` past it without needing to know its contents.
+///
+/// Recurses into `array` and `struct` (skipping each element/field in
+/// turn) and into `optional` (only if present). Used by callers that only
+/// care about a handful of fields in a struct and need to correctly skip
+/// past the rest — see [`crate::details::decode_player`] for an example.
+///
+/// # Errors
+/// Returns [`ProtocolError::UnsupportedTag`] if a tag outside the known
+/// set (`0x00`-`0x09`) is encountered — currently `bitarray` (`0x01`) and
+/// `choice` (`0x03`) aren't handled.
 pub fn skip_value(bytes: &[u8], pos: &mut usize) -> Result<(), ProtocolError> {
     let tag = next_byte(bytes, pos);
 

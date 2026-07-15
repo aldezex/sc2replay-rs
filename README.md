@@ -10,7 +10,7 @@ This isn't meant to outperform sc2reader or to be production-ready — it's a Ru
 
 ## Current status
 
-🚧 Actively in development. **Phase 1 (MPQ container) complete** — starting Phase 2 (SC2 event protocol).
+🚧 Actively in development. **Phase 1 (MPQ container) complete** — Phase 2 (SC2 event protocol) underway, with `replay.details` decoding working end-to-end against real replays.
 
 ### Architecture change: extracting `mpq-parser`
 
@@ -29,9 +29,15 @@ MPQ container parsing (which isn't specific to StarCraft II — it's a generic B
 
 See the [mpq-parser README](https://github.com/aldezex/mpq-parser) for the full detail of this phase.
 
-### In progress
+### In progress (Phase 2 — SC2 protocol deserialization)
 
-- [ ] **Phase 2 — Protocol deserialization**: interpreting the already-extracted contents of `replay.details`, `replay.tracker.events`, and `replay.game.events` as meaningful data (map, players, build order, game events). Unlike the MPQ container, the protocol is versioned by game build — scope decision: support recent versions only, not the game's entire history.
+Unlike the MPQ container, this protocol is versioned by game build — scope decision: support recent versions only, not the game's entire history. Field layouts are cross-checked against [Blizzard/s2protocol](https://github.com/Blizzard/s2protocol)'s per-build protocol definitions (currently targeting a build close to `protocol97425`).
+
+- [x] **`VersionedDecoder` primitives** (`protocol.rs`): `read_vint` (variable-length signed integers), `read_blob`, `read_optional`, `read_array`, `read_struct`, and `skip_value` (recursive skip of any tagged value, used to correctly bypass fields not being decoded).
+- [x] **`replay.details` decoding** (`details.rs`, `player.rs`): map name and player list (name + race), verified against a real replay — including correctly handling `m_playerList` being an `optional<array<...>>` rather than a bare array, a mismatch first caught by cross-referencing an outdated protocol version against a current one.
+- [x] **In-game text markup formatting** (`format.rs`): resolves SC2's name markup (`<sp/>`, escaped `&lt;`/`&gt;`/`&amp;`, embedded color tags) into plain text, using `regex`.
+- [ ] Remaining `SDetails` fields (game result, timestamps, etc.).
+- [ ] `replay.tracker.events` and `replay.game.events` decoding.
 
 ### Pending
 
@@ -43,6 +49,10 @@ See [`plan-sc2reader-rust.md`](./plan-sc2reader-rust.md) for the full milestone 
 sc2reader-rs/
 ├── src/
 │   ├── lib.rs          # declares the crate's public modules
+│   ├── protocol.rs      # generic VersionedDecoder primitives (read_vint, read_struct, skip_value, ...)
+│   ├── details.rs        # replay.details decoding (SDetails)
+│   ├── player.rs         # Player domain type
+│   ├── format.rs         # SC2 in-game text markup formatting
 │   └── bin/
 │       └── inspect.rs   # debug binary: loads a replay and explores its structure,
 │                          using mpq-parser (external dependency) for the MPQ container
@@ -61,11 +71,13 @@ MPQ container parsing itself lives in the separate [mpq-parser](https://github.c
 - **`thiserror`** to generate `Display`/`Error` for the custom error types, after implementing both by hand once to understand what they do.
 - **Incrementally supported compression**: zlib and bzip2 (the two methods observed in real data), with an explicit error for any other method instead of trying to cover the full spec upfront.
 - **Integration tests with local, unversioned fixtures** (`tests/fixtures/`, in `.gitignore`) to verify against real replays without publishing a new version on every iteration.
+- **Fields decoded on a need basis.** Rather than modeling every field of every `SDetails`/event struct upfront, only the fields actually needed are decoded (`match` on field index); everything else is explicitly skipped (`skip_value`) to keep the byte stream aligned without requiring full knowledge of every nested type.
+- **`regex` for in-game text markup**, instead of chained `.replace()` calls, since SC2's color tags carry variable hex values that literal string replacement can't match.
 
 ## Resources used
 
 - [sc2reader (Python)](https://github.com/ggtracker/sc2reader) — de facto specification of the behavior being replicated.
-- [Blizzard/s2protocol](https://github.com/Blizzard/s2protocol) — reference for the event serialization protocol.
+- [Blizzard/s2protocol](https://github.com/Blizzard/s2protocol) — reference for the event serialization protocol; per-build protocol definitions used to resolve `SDetails` field layout.
 - Community documentation on the MPQ format (StormLib / modding wiki) for the container and its cryptography.
 - [mpq-parser](https://github.com/aldezex/mpq-parser) — own library (sibling crate) for MPQ container parsing.
 - [nom-mpq](https://lib.rs/crates/nom-mpq) — MPQ parser used by `s2protocol`, with a different approach (parser combinators via `nom`); interesting reference, not used as a dependency.
