@@ -10,13 +10,15 @@ This isn't meant to outperform sc2reader or to be production-ready — it's a Ru
 
 ## Current status
 
-🚧 Actively in development. **Phase 1 (MPQ container) complete** — Phase 2 (SC2 event protocol) underway, with `replay.details` decoding working end-to-end against real replays.
+🚧 Actively in development. **Phase 1 (MPQ container) complete.** Phase 2 (SC2 event protocol): `replay.details` decoding complete for the fields relevant to this project's use case (1v1 ladder analysis).
 
 ### Architecture change: extracting `mpq-parser`
 
 MPQ container parsing (which isn't specific to StarCraft II — it's a generic Blizzard format) was extracted into its own independent, published library: **[mpq-parser](https://crates.io/crates/mpq-parser)** ([repo](https://github.com/aldezex/mpq-parser)).
 
 `sc2reader-rs` depends on `mpq-parser` as a real external dependency (via crates.io), not as in-repo code. This added an unplanned extra bit of learning to the project: managing an independent crate, semantic versioning, and real publishing to the registry.
+
+Now published itself on crates.io as [`sc2reader-rs`](https://crates.io/crates/sc2reader-rs).
 
 ### Completed (Phase 1 — MPQ container, in `mpq-parser`)
 
@@ -29,15 +31,20 @@ MPQ container parsing (which isn't specific to StarCraft II — it's a generic B
 
 See the [mpq-parser README](https://github.com/aldezex/mpq-parser) for the full detail of this phase.
 
-### In progress (Phase 2 — SC2 protocol deserialization)
+### Completed (Phase 2, part 1 — `replay.details`)
 
 Unlike the MPQ container, this protocol is versioned by game build — scope decision: support recent versions only, not the game's entire history. Field layouts are cross-checked against [Blizzard/s2protocol](https://github.com/Blizzard/s2protocol)'s per-build protocol definitions (currently targeting a build close to `protocol97425`).
 
-- [x] **`VersionedDecoder` primitives** (`protocol.rs`): `read_vint` (variable-length signed integers), `read_blob`, `read_optional`, `read_array`, `read_struct`, and `skip_value` (recursive skip of any tagged value, used to correctly bypass fields not being decoded).
-- [x] **`replay.details` decoding** (`details.rs`, `player.rs`): map name and player list (name + race), verified against a real replay — including correctly handling `m_playerList` being an `optional<array<...>>` rather than a bare array, a mismatch first caught by cross-referencing an outdated protocol version against a current one.
+- [x] **`VersionedDecoder` primitives** (`protocol.rs`): `read_vint` (variable-length signed integers), `read_blob`, `read_optional`, `read_array`, `read_struct`, `read_u8` (also used to decode `bool` fields, which share the same wire encoding), and `skip_value` (recursive skip of any tagged value, used to correctly bypass fields not being decoded).
+- [x] **`replay.details` decoding** (`details.rs`, `player.rs`): map name and player list (name + race).
 - [x] **In-game text markup formatting** (`format.rs`): resolves SC2's name markup (`<sp/>`, escaped `&lt;`/`&gt;`/`&amp;`, embedded color tags) into plain text, using `regex`.
-- [ ] Remaining `SDetails` fields (game result, timestamps, etc.).
-- [ ] `replay.tracker.events` and `replay.game.events` decoding.
+
+**Scope decision:** `SDetails` has ~18 fields; only `m_playerList` and `m_title` are decoded. Fields like `m_isBlizzardMap`, `m_gameSpeed`, `m_timeUTC`, etc. are intentionally left unparsed (skipped via `skip_value`) — for this project's target use case (analyzing 1v1 ladder replays), these are effectively constant (official maps, fixed speed) and not worth the added surface area. This is a conscious scope cut, not unfinished work; revisit if the project ever needs to support non-ladder replays.
+
+### In progress / next up
+
+- [ ] **`replay.tracker.events` decoding** — the highest-value target for gameplay analysis: unit creation/death, resource transfers, periodic stats. Uses the same `VersionedDecoder` primitives already built for `SDetails`, plus a new "event stream" layer (gameloop delta + event id prefixing each event) not yet implemented.
+- [ ] `replay.game.events` — uses the *other* encoding mode (`BitPackedDecoder`, untagged/positional), not yet started.
 
 ### Pending
 
@@ -71,7 +78,7 @@ MPQ container parsing itself lives in the separate [mpq-parser](https://github.c
 - **`thiserror`** to generate `Display`/`Error` for the custom error types, after implementing both by hand once to understand what they do.
 - **Incrementally supported compression**: zlib and bzip2 (the two methods observed in real data), with an explicit error for any other method instead of trying to cover the full spec upfront.
 - **Integration tests with local, unversioned fixtures** (`tests/fixtures/`, in `.gitignore`) to verify against real replays without publishing a new version on every iteration.
-- **Fields decoded on a need basis.** Rather than modeling every field of every `SDetails`/event struct upfront, only the fields actually needed are decoded (`match` on field index); everything else is explicitly skipped (`skip_value`) to keep the byte stream aligned without requiring full knowledge of every nested type.
+- **Fields decoded on a need basis.** Rather than modeling every field of every `SDetails`/event struct upfront, only the fields actually useful for the project's goal (1v1 ladder replay analysis) are decoded; everything else is explicitly skipped (`skip_value`) to keep the byte stream aligned without requiring full knowledge of every nested type.
 - **`regex` for in-game text markup**, instead of chained `.replace()` calls, since SC2's color tags carry variable hex values that literal string replacement can't match.
 
 ## Resources used
