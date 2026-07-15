@@ -65,4 +65,13 @@ fn main() {
             .expect("couldn't extract file");
 
     println!("{} bytes extracted (tracker)", tracker_contents.len());
+
+    let details_bytes = mpq_parser::archive::extract_file(&replay, offset as u32, *details_block)
+        .expect("couldn't extract file");
+
+    let details = sc2reader_rs::details::decode_replay_details(&details_bytes);
+    println!("Map: {}", details.map_name);
+    for player in &details.players {
+        println!("  {} ({})", player.name, player.race);
+    }
 }

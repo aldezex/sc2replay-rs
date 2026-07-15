@@ -1,3 +1,9 @@
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("unsupported tag {tag:#04x} at position {pos}")]
+    UnsupportedTag { tag: u8, pos: usize },
+}
+
 /// Reads a variable-length signed integer (`vint`) from `bytes` starting
 /// at `*pos`, advancing `*pos` past the bytes consumed.
 ///
@@ -93,6 +99,50 @@ pub fn read_struct(
     }
 }
 
+pub fn skip_value(bytes: &[u8], pos: &mut usize) -> Result<(), ProtocolError> {
+    let tag = next_byte(bytes, pos);
+
+    match tag {
+        0x00 => {
+            let long = read_vint(bytes, pos);
+            for _ in 0..long {
+                skip_value(bytes, pos)?;
+            }
+        }
+        0x02 => {
+            let long = read_vint(bytes, pos);
+            *pos += long as usize;
+        }
+        0x04 => {
+            let present = next_byte(bytes, pos);
+            if present != 0 {
+                skip_value(bytes, pos)?;
+            }
+        }
+        0x05 => {
+            let fields_number = read_vint(bytes, pos);
+            for _ in 0..fields_number {
+                read_vint(bytes, pos);
+                skip_value(bytes, pos)?;
+            }
+        }
+        0x06 => *pos += 1,
+        0x07 => *pos += 4,
+        0x08 => *pos += 8,
+        0x09 => {
+            read_vint(bytes, pos);
+        }
+        other => {
+            return Err(ProtocolError::UnsupportedTag {
+                tag: other,
+                pos: *pos - 1,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +220,20 @@ mod tests {
         assert_eq!(field_0, 0x41);
         assert_eq!(field_1, 0x42);
         assert_eq!(pos, 6);
+    }
+
+    #[test]
+    fn skips_struct_with_nested_blob() {
+        let bytes = [
+            0x05, 0x02, // tag(struct), num_fields=1
+            0x00, // field_index=0
+            0x02, 0x04, 0x41, 0x42, // tag(blob), vint(2), 'A', 'B'
+            0xFF,
+        ];
+        let mut pos = 0;
+
+        skip_value(&bytes, &mut pos);
+
+        assert_eq!(pos, bytes.len() - 1);
     }
 }
