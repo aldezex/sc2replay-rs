@@ -14,15 +14,17 @@ use mpq_parser::{MpqHeader, MpqParseError, MpqUserDataHeader};
 
 use crate::details::decode_replay_details;
 use crate::events::{TrackerEvent, decode_tracker_events};
+use crate::game_events::{GameEvent, GameEventsError, decode_game_events};
 use crate::player::Player;
 
 /// A fully decoded replay: everything currently extracted from
-/// `replay.details` and `replay.tracker.events`.
+/// `replay.details`, `replay.tracker.events`, and `replay.game.events`.
 #[derive(Debug)]
 pub struct Replay {
     pub map_name: String,
     pub players: Vec<Player>,
     pub tracker_events: Vec<TrackerEvent>,
+    pub game_events: Vec<GameEvent>,
 }
 
 /// Errors that can occur while loading a replay end-to-end.
@@ -34,13 +36,21 @@ pub enum ReplayError {
     Mpq(#[from] MpqParseError),
     #[error("required internal file not found in archive: {0}")]
     MissingFile(&'static str),
+    /// Unlike `replay.details`/`replay.tracker.events` decoding (both
+    /// infallible), `replay.game.events` decoding can fail on an
+    /// unsupported event id — see [`GameEventsError`] for why that's
+    /// intentional rather than a gap to "fix" by making decoding
+    /// infallible again.
+    #[error("failed to decode replay.game.events: {0}")]
+    GameEvents(#[from] GameEventsError),
 }
 
 /// Loads and fully decodes a `.SC2Replay` file from `path`.
 ///
 /// Equivalent to running the MPQ container pipeline (header → hash table
-/// → block table → file lookup/extraction) followed by protocol
-/// decoding of `replay.details` and `replay.tracker.events`, in one call.
+/// → block table → file lookup/extraction) followed by protocol decoding
+/// of `replay.details`, `replay.tracker.events`, and `replay.game.events`,
+/// in one call.
 pub fn load_replay(path: &str) -> Result<Replay, ReplayError> {
     let bytes = std::fs::read(path)?;
 
@@ -82,9 +92,20 @@ pub fn load_replay(path: &str) -> Result<Replay, ReplayError> {
     let tracker_bytes = extract_file(&bytes, offset as u32, *tracker_block)?;
     let tracker_events = decode_tracker_events(&tracker_bytes);
 
+    let game_events_block = find_file(
+        "replay.game.events",
+        &hash_entries,
+        &block_entries,
+        &crypt_table,
+    )
+    .ok_or(ReplayError::MissingFile("replay.game.events"))?;
+    let game_events_bytes = extract_file(&bytes, offset as u32, *game_events_block)?;
+    let game_events = decode_game_events(&game_events_bytes)?;
+
     Ok(Replay {
         map_name: details.map_name,
         players: details.players,
         tracker_events,
+        game_events,
     })
 }

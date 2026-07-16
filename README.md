@@ -10,7 +10,7 @@ This isn't meant to outperform sc2reader or to be production-ready — it's a Ru
 
 ## Current status
 
-🚧 Actively in development. **Phase 1 (MPQ container) complete.** Phase 2 (SC2 event protocol): `replay.details` and `replay.tracker.events` both decoding end-to-end against real replays.
+🚧 Actively in development. **Phase 1 (MPQ container) complete.** Phase 2 (SC2 event protocol): `replay.details` and `replay.tracker.events` both decoding end-to-end against real replays. `replay.game.events`'s `BitPackedDecoder` and `SCmdEvent` decoding are implemented and unit-tested against real data, but currently cannot produce a useful event stream from real replays — see the "known limitation" below.
 
 ### Architecture change: extracting `mpq-parser`
 
@@ -47,9 +47,20 @@ See the [mpq-parser README](https://github.com/aldezex/mpq-parser) for the full 
 
 **Key insight that shaped this phase:** for the `VersionedDecoder` encoding (used by both `replay.details` and `replay.tracker.events`), the bit-width/offset parameters attached to types in Blizzard's `typeinfos` tables (e.g. `_int(0,8)`) are irrelevant — only the runtime type tag byte matters. This is what makes tag-generic helpers like `read_tagged_int` and `skip_value` possible without modeling every type's exact parameters.
 
+### Completed (Phase 2, part 3 — `replay.game.events`, `BitPackedDecoder` + `SCmdEvent`)
+
+- [x] **`BitPackedDecoder` bit reader primitives** (`bitpacked.rs`): `read_bits`, `byte_align`, `read_aligned_bytes`, `read_int`, `read_optional`, `read_optional_int`, `read_var_uint32`. Unlike `VersionedDecoder`, there are no type tags here — the `(offset, bits)` parameters are load-bearing, since every field's exact bit width has to be known and hardcoded ahead of time.
+- [x] **Bit order verified against Blizzard's actual reference implementation** (`decoders.py`'s `BitPackedBuffer.read_bits`, not assumed): within a byte, bits are consumed low-to-high, but across a byte boundary the *earlier*-consumed byte occupies the *more* significant part of the result (`endian='big'` is `BitPackedDecoder`'s default) — this is **not** the same as flattening the buffer into one little-endian bitstream and slicing. Getting this wrong silently corrupts every field after the first mistake; see `bitpacked.rs`'s unit tests, in particular `reads_across_a_byte_boundary_is_not_ambiguous`, the one test whose expected value actually distinguishes the two models.
+- [x] **`SCmdEvent` decoding** (`game_events.rs`, typeid 100, event id 27): `m_cmdFlags`, `m_abil` (`abil_link`/`abil_cmd_index`/`abil_cmd_data`), `m_data`'s 4-way choice (`None`/`TargetPoint`/`TargetUnit`/`Data`, modeled as `CmdData`), `m_sequence`, `m_otherUnit`, `m_unitGroup`. Field layout cross-checked directly against `protocol97425.py`'s `typeinfos`.
+- [x] **Gameloop-delta + userid + event-id stream orchestration** (`decode_game_events`), verified bit-exact against a real replay: the decoder correctly identifies the first event's id and bit position and fails with a typed error rather than panicking or silently misaligning.
+
+**Known limitation — `decode_game_events` cannot yet produce a useful `CmdEvent` stream from real replays.** Per the recommended scope, only `SCmdEvent` (event id 27) is modeled; every other `NNet.Game.*Event` type (there are ~80 in `protocol97425`, e.g. camera updates, hotkeys, selections, sync markers) causes decoding to abort with `GameEventsError::UnsupportedEventId` rather than being generically skipped — there is no way to skip a value of unknown bit width in this untagged format without knowing its exact layout ahead of time. In practice this means decoding stops at the **very first event** of any real replay: SC2 always emits non-command bookkeeping events before the first player command (confirmed empirically — the first event of this project's test fixture is `NNet.Game.SSetSyncLoadingTimeEvent`, event id 116). Making this useful for its original motivation (build-order/supply timeline reconstruction) requires porting Blizzard's full `typeinfos` table (~209 entries in `protocol97425`) as a generic, structure-only (no field names) bit-level skip, mirroring how `protocol.rs`'s `skip_value` works for the tagged `VersionedDecoder` format — tracked as follow-up work below.
+
+**Also out of scope:** ability-ID → human-readable name mapping (`abil_link`/`abil_cmd_index` → "Train SCV") requires a `CommandCard` data table not present in `protocol97425.py`; callers get raw numeric ids.
+
 ### In progress / next up
 
-- [ ] `replay.game.events` — uses the *other* encoding mode (`BitPackedDecoder`, untagged/positional), not yet started. Field bit-widths *do* matter for this decoder, unlike `VersionedDecoder`.
+- [ ] Generic bit-level skip for non-`SCmdEvent` event ids in `replay.game.events` (see known limitation above) — required before any real build-order use case works.
 - [ ] Higher-level analysis built on top of decoded events (build order reconstruction, resource efficiency, engagement detection) — the original motivation for this whole project.
 
 ### Pending
@@ -63,15 +74,20 @@ sc2reader-rs/
 ├── src/
 │   ├── lib.rs          # declares the crate's public modules
 │   ├── macros.rs         # read_int_fields! and other decoding-boilerplate macros
+│   ├── bitpacked.rs      # generic BitPackedDecoder primitives (read_bits, read_int, ...)
 │   ├── protocol.rs      # generic VersionedDecoder primitives (read_vint, read_struct, skip_value, ...)
 │   ├── details.rs        # replay.details decoding (SDetails)
 │   ├── player.rs         # Player domain type
 │   ├── events.rs          # replay.tracker.events decoding (TrackerEvent, PlayerStats)
+│   ├── game_events.rs    # replay.game.events decoding (SCmdEvent only)
 │   ├── format.rs         # SC2 in-game text markup formatting
 │   └── bin/
 │       └── inspect.rs   # debug binary: loads a replay and explores its structure,
 │                          using mpq-parser (external dependency) for the MPQ container
 ├── fixtures/             # real .SC2Replay files used for manual testing
+├── tests/
+│   ├── game_events.rs    # integration tests against a real fixture replay
+│   └── fixtures/         # real .SC2Replay files for integration tests (gitignored)
 └── plan-sc2reader-rust.md
 ```
 
