@@ -167,6 +167,33 @@ pub fn skip_value(bytes: &[u8], pos: &mut usize) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+pub fn read_choice_as_int(bytes: &[u8], pos: &mut usize) -> i64 {
+    let _tag = next_byte(bytes, pos);
+    let _selector = read_vint(bytes, pos);
+
+    read_tagged_int(bytes, pos)
+}
+
+pub fn read_tagged_int(bytes: &[u8], pos: &mut usize) -> i64 {
+    let tag = next_byte(bytes, pos);
+
+    match tag {
+        0x06 => next_byte(bytes, pos) as i64,
+        0x07 => {
+            let bytes4: [u8; 4] = bytes[*pos..*pos + 4].try_into().unwrap();
+            *pos += 4;
+            u32::from_le_bytes(bytes4) as i64
+        }
+        0x08 => {
+            let bytes8: [u8; 8] = bytes[*pos..*pos + 8].try_into().unwrap();
+            *pos += 8;
+            u64::from_le_bytes(bytes8) as i64
+        }
+        0x09 => read_vint(bytes, pos),
+        _ => unimplemented!("cannot read tagged int"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +286,17 @@ mod tests {
         skip_value(&bytes, &mut pos);
 
         assert_eq!(pos, bytes.len() - 1);
+    }
+
+    #[test]
+    fn reads_choice_as_int() {
+        // tag(choice)=0x03, selector=vint(0), tag(vint)=0x09, valor=vint(5)
+        let bytes = [0x03, 0x00, 0x09, 0x0A]; // 5<<1 = 0x0A
+        let mut pos = 0;
+
+        let result = read_choice_as_int(&bytes, &mut pos);
+
+        assert_eq!(result, 5);
+        assert_eq!(pos, 4);
     }
 }

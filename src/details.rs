@@ -45,7 +45,7 @@ pub fn decode_replay_details(bytes: &[u8]) -> ReplayDetails {
     read_struct(bytes, &mut pos, |b, p, field_index| match field_index {
         0 => {
             let list = read_optional(b, p, |b2, p2| {
-                read_array(b2, p2, |b3, p3| decode_player(b3, p3))
+                read_array(b2, p2, decode_player)
             });
             players = list.unwrap_or_default();
         }

@@ -74,4 +74,8 @@ fn main() {
     for player in &details.players {
         println!("  {} ({})", player.name, player.race);
     }
+
+    let events = sc2reader_rs::events::decode_tracker_events(&tracker_contents);
+    println!("Decoded {} events", events.len());
+    println!("{:#?}", &events[..5.min(events.len())]);
 }
