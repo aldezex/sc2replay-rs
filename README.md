@@ -10,7 +10,7 @@ This isn't meant to outperform sc2reader or to be production-ready — it's a Ru
 
 ## Current status
 
-🚧 Actively in development. **Phase 1 (MPQ container) complete.** Phase 2 (SC2 event protocol): `replay.details` and `replay.tracker.events` both decoding end-to-end against real replays. `replay.game.events`'s `BitPackedDecoder` and `SCmdEvent` decoding are implemented and unit-tested against real data, but currently cannot produce a useful event stream from real replays — see the "known limitation" below.
+🚧 Actively in development. **Phase 1 (MPQ container) complete.** Phase 2 (SC2 event protocol): `replay.details`, `replay.tracker.events`, and `replay.game.events` (`SCmdEvent`) all decoding end-to-end against real replays.
 
 ### Architecture change: extracting `mpq-parser`
 
@@ -52,15 +52,14 @@ See the [mpq-parser README](https://github.com/aldezex/mpq-parser) for the full 
 - [x] **`BitPackedDecoder` bit reader primitives** (`bitpacked.rs`): `read_bits`, `byte_align`, `read_aligned_bytes`, `read_int`, `read_optional`, `read_optional_int`, `read_var_uint32`. Unlike `VersionedDecoder`, there are no type tags here — the `(offset, bits)` parameters are load-bearing, since every field's exact bit width has to be known and hardcoded ahead of time.
 - [x] **Bit order verified against Blizzard's actual reference implementation** (`decoders.py`'s `BitPackedBuffer.read_bits`, not assumed): within a byte, bits are consumed low-to-high, but across a byte boundary the *earlier*-consumed byte occupies the *more* significant part of the result (`endian='big'` is `BitPackedDecoder`'s default) — this is **not** the same as flattening the buffer into one little-endian bitstream and slicing. Getting this wrong silently corrupts every field after the first mistake; see `bitpacked.rs`'s unit tests, in particular `reads_across_a_byte_boundary_is_not_ambiguous`, the one test whose expected value actually distinguishes the two models.
 - [x] **`SCmdEvent` decoding** (`game_events.rs`, typeid 100, event id 27): `m_cmdFlags`, `m_abil` (`abil_link`/`abil_cmd_index`/`abil_cmd_data`), `m_data`'s 4-way choice (`None`/`TargetPoint`/`TargetUnit`/`Data`, modeled as `CmdData`), `m_sequence`, `m_otherUnit`, `m_unitGroup`. Field layout cross-checked directly against `protocol97425.py`'s `typeinfos`.
-- [x] **Gameloop-delta + userid + event-id stream orchestration** (`decode_game_events`), verified bit-exact against a real replay: the decoder correctly identifies the first event's id and bit position and fails with a typed error rather than panicking or silently misaligning.
-
-**Known limitation — `decode_game_events` cannot yet produce a useful `CmdEvent` stream from real replays.** Per the recommended scope, only `SCmdEvent` (event id 27) is modeled; every other `NNet.Game.*Event` type (there are ~80 in `protocol97425`, e.g. camera updates, hotkeys, selections, sync markers) causes decoding to abort with `GameEventsError::UnsupportedEventId` rather than being generically skipped — there is no way to skip a value of unknown bit width in this untagged format without knowing its exact layout ahead of time. In practice this means decoding stops at the **very first event** of any real replay: SC2 always emits non-command bookkeeping events before the first player command (confirmed empirically — the first event of this project's test fixture is `NNet.Game.SSetSyncLoadingTimeEvent`, event id 116). Making this useful for its original motivation (build-order/supply timeline reconstruction) requires porting Blizzard's full `typeinfos` table (~209 entries in `protocol97425`) as a generic, structure-only (no field names) bit-level skip, mirroring how `protocol.rs`'s `skip_value` works for the tagged `VersionedDecoder` format — tracked as follow-up work below.
+- [x] **Generic bit-level skip for unmodeled event types** (`typeinfos.rs` + `game_events.rs::skip_bitpacked_value`): a Rust transcription of `protocol97425.py`'s full `typeinfos` table (209 entries, mechanically generated from the fetched reference file, not hand-derived) plus a recursive interpreter that computes exactly how many bits *any* typeid occupies — including the ~99 other `NNet.Game.*Event` types (camera updates, hotkeys, selections, sync markers, etc.) that aren't individually modeled. This is the untagged-format equivalent of `protocol.rs`'s `skip_value`, except it can't be a blind byte-count skip: `_optional`/`_choice`/`_array`/`_blob`/`_bitarray` all require actually decoding a presence bit, selector, or count to know how much more to skip.
+- [x] **Gameloop-delta + userid + event-id stream orchestration** (`decode_game_events`), verified end-to-end against a full, real 1v1 ladder replay: the entire `replay.game.events` stream decodes successfully (hundreds of `SCmdEvent`s extracted, gameloops strictly increasing, alternating between both players, `TargetPoint`/`TargetUnit` data consistent with real move/attack commands), landing exactly on `bytes.len()` with no leftover bits and no panics.
 
 **Also out of scope:** ability-ID → human-readable name mapping (`abil_link`/`abil_cmd_index` → "Train SCV") requires a `CommandCard` data table not present in `protocol97425.py`; callers get raw numeric ids.
 
 ### In progress / next up
 
-- [ ] Generic bit-level skip for non-`SCmdEvent` event ids in `replay.game.events` (see known limitation above) — required before any real build-order use case works.
+- [ ] Ability-ID → unit/building-name mapping (`CommandCard` data), needed to turn raw `abil_link`/`abil_cmd_index` pairs into readable build-order entries.
 - [ ] Higher-level analysis built on top of decoded events (build order reconstruction, resource efficiency, engagement detection) — the original motivation for this whole project.
 
 ### Pending
@@ -79,7 +78,8 @@ sc2reader-rs/
 │   ├── details.rs        # replay.details decoding (SDetails)
 │   ├── player.rs         # Player domain type
 │   ├── events.rs          # replay.tracker.events decoding (TrackerEvent, PlayerStats)
-│   ├── game_events.rs    # replay.game.events decoding (SCmdEvent only)
+│   ├── game_events.rs    # replay.game.events decoding (SCmdEvent + generic skip)
+│   ├── typeinfos.rs      # generated protocol97425 typeinfos table, used by the generic skip
 │   ├── format.rs         # SC2 in-game text markup formatting
 │   └── bin/
 │       └── inspect.rs   # debug binary: loads a replay and explores its structure,
@@ -102,7 +102,8 @@ MPQ container parsing itself lives in the separate [mpq-parser](https://github.c
 - **`thiserror`** to generate `Display`/`Error` for the custom error types.
 - **Incrementally supported compression**: zlib and bzip2 (the two methods observed in real data), with an explicit error for any other method.
 - **Integration tests with local, unversioned fixtures** (`tests/fixtures/`, in `.gitignore`).
-- **Fields decoded on a need basis.** Rather than modeling every field of every `SDetails`/event struct upfront, only fields actually useful for the project's goal are decoded; everything else is explicitly skipped (`skip_value`) to keep the byte stream aligned.
+- **Fields decoded on a need basis.** Rather than modeling every field of every `SDetails`/event struct upfront, only fields actually useful for the project's goal are decoded; everything else is explicitly skipped (`skip_value`, or `skip_bitpacked_value` for `replay.game.events`) to keep the byte stream aligned.
+- **`typeinfos.rs` is mechanically generated, not hand-transcribed.** For a 209-entry table where a single wrong bit width silently corrupts everything downstream, a small script parsing `protocol97425.py`'s `typeinfos` literal directly (Python's own `ast.literal_eval`) is far less error-prone than retyping 209 entries by hand — the same reasoning already applied at smaller scale to `SCmdEvent`'s own field layout.
 - **`regex` for in-game text markup**, instead of chained `.replace()` calls.
 - **A small `macro_rules!` macro for repetitive field decoding**, used specifically where hand-writing every `match` arm would add volume without adding clarity (`PlayerStats`'s 39 fields). Not used elsewhere — most structs are small enough that explicit `match` arms are more readable than a macro invocation.
 

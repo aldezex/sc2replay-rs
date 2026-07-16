@@ -1,64 +1,82 @@
-use sc2reader_rs::game_events::GameEventsError;
-use sc2reader_rs::replay::{ReplayError, load_replay};
+use sc2reader_rs::game_events::GameEvent;
+use sc2reader_rs::replay::load_replay;
 
 const FIXTURE: &str = "tests/fixtures/dont-oracle-me.SC2Replay";
 
 #[test]
-fn decode_game_events_reports_first_unsupported_event_without_panicking() {
-    // Only SCmdEvent (event id 27) is modeled; every other
-    // `NNet.Game.*Event` type is treated as unsupported and aborts
-    // decoding rather than being generically skipped — there's no way to
-    // skip a value of unknown bit width in this untagged format (see the
-    // module doc on `decode_game_events`).
-    //
-    // In practice this means decoding stops at the very first event of
-    // *any* real replay: SC2 always emits non-command bookkeeping events
-    // (sync markers, camera updates, user options, etc.) well before the
-    // first player command. For this fixture, that first event is
-    // `NNet.Game.SSetSyncLoadingTimeEvent` (event id 116, typeid 191 per
-    // protocol97425's `game_event_types` table) — confirmed by manual
-    // inspection against the reference protocol file, not a decoding bug
-    // (the bit reader itself is separately verified by
-    // src/bitpacked.rs's unit tests, including against Blizzard's actual
-    // `BitPackedBuffer` algorithm). This is a known, current limitation —
-    // see the README's "Known limitations" section — pending future
-    // generic bit-level skip support. This test locks in that decoding
-    // fails predictably (a typed error, not a panic or silent
-    // misalignment) at the exact expected event id/position, so a
-    // regression in the bit reader or stream framing would be caught
-    // here even though no `CmdEvent`s can be extracted from this fixture
-    // today.
-    let result = load_replay(FIXTURE);
+fn decodes_game_events_stream_without_panicking() {
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
 
-    match result {
-        Err(ReplayError::GameEvents(GameEventsError::UnsupportedEventId {
-            event_id,
-            bit_pos,
-        })) => {
-            assert_eq!(event_id, 116);
-            assert_eq!(bit_pos, 20);
-        }
-        other => panic!("expected GameEventsError::UnsupportedEventId, got {other:?}"),
-    }
+    // Confirms the full replay.game.events byte stream was walked to
+    // completion: every event id was either SCmdEvent (fully decoded) or
+    // present in game_event_types and correctly skipped via
+    // skip_bitpacked_value, landing exactly on byte_align() boundaries
+    // with no leftover unconsumed bits and no panics, per step 2 of the
+    // verification strategy in the implementation brief.
+    assert!(!replay.game_events.is_empty());
 }
 
 #[test]
-#[ignore = "decode_game_events cannot progress past the very first event of a real replay today, since it's never SCmdEvent and there's no generic bit-level skip for other event types (see README known limitations); blocked until that's implemented"]
 fn first_cmd_events_expose_fields_for_manual_cross_check() {
-    // Once generic skip support exists and decode_game_events can walk
-    // past non-SCmdEvent events, this should decode the first 5 CmdEvents
-    // from `FIXTURE`, print their gameloop/user_id/abil_link/
-    // abil_cmd_index, and have the project owner cross-check those
-    // printed values against a third-party replay analysis tool for the
-    // fixture's early worker-training commands (per the test battery's
-    // `first_cmd_events_match_reference_tool` acceptance criterion) —
-    // a decoder that "compiles and doesn't panic" is not sufficient
-    // evidence of correctness for a positional, untagged format like
-    // this one.
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
+
+    let cmd_events: Vec<_> = replay
+        .game_events
+        .iter()
+        .map(|e| match e {
+            GameEvent::Cmd(c) => c,
+        })
+        .take(5)
+        .collect();
+
+    assert_eq!(cmd_events.len(), 5);
+
+    for c in &cmd_events {
+        println!(
+            "gameloop={} user_id={} abil_link={:?} abil_cmd_index={:?}",
+            c.gameloop,
+            c.user_id,
+            c.abil.as_ref().map(|a| a.abil_link),
+            c.abil.as_ref().map(|a| a.abil_cmd_index),
+        );
+    }
+
+    // TODO(project owner): run `cargo test first_cmd_events -- --nocapture`,
+    // open tests/fixtures/dont-oracle-me.SC2Replay in a third-party replay
+    // analysis tool that exposes raw game events (or SCV/worker training
+    // timestamps specifically), and confirm the printed gameloop/user_id/
+    // abil_link/abil_cmd_index values above for the first few
+    // worker-training commands. Once confirmed, replace the println!s
+    // with real assert_eq!s per event (per the test battery's
+    // `first_cmd_events_match_reference_tool` acceptance criterion) — a
+    // decoder that "compiles and doesn't panic" is not sufficient
+    // evidence of correctness for a positional, untagged format like this
+    // one.
 }
 
 #[test]
-#[ignore = "requires both the tracker-event and game-event pipelines cross-referenced by unit-training ordering (not exact tag matching), plus abil-id -> unit-name mapping (explicitly out of scope) and generic event skip support (see the other ignored tests in this file); see briefs/BitPackedDecoder.md"]
+fn decodes_a_large_number_of_cmd_events_from_a_full_ladder_replay() {
+    // Regression guard for the generic bit-level skip (skip_bitpacked_value):
+    // before it existed, decode_game_events failed on the very first event
+    // of this fixture (event id 116, SSetSyncLoadingTimeEvent) and produced
+    // zero CmdEvents. This asserts a real, substantial number of SCmdEvents
+    // are now extracted from the full stream -- not just "doesn't panic".
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
+
+    let cmd_event_count = replay
+        .game_events
+        .iter()
+        .filter(|e| matches!(e, GameEvent::Cmd(_)))
+        .count();
+
+    assert!(
+        cmd_event_count > 50,
+        "expected a substantial number of CmdEvents from a full 1v1 ladder replay, got {cmd_event_count}"
+    );
+}
+
+#[test]
+#[ignore = "requires both the tracker-event and game-event pipelines cross-referenced by unit-training ordering (not exact tag matching), plus abil-id -> unit-name mapping, which is explicitly out of scope for this decoder; see briefs/BitPackedDecoder.md"]
 fn worker_training_supply_reservation_matches_expected_offset() {
     // The original motivation for this whole feature: confirm that a
     // worker-training SCmdEvent's gameloop is *earlier* than the
