@@ -1,0 +1,90 @@
+//! High-level, one-call replay loading — the equivalent of sc2reader's
+//! own `sc2reader.load_replay()` in the Python original.
+//!
+//! Wraps the full pipeline (MPQ container → hash/block tables → file
+//! lookup/extraction → protocol decoding) that would otherwise need to
+//! be repeated by hand in every consumer of this crate.
+
+use mpq_parser::archive::{extract_file, find_file};
+use mpq_parser::block::parse_block_table_entries;
+use mpq_parser::crypto::decrypt;
+use mpq_parser::crypto::{MPQ_HASH_FILE_KEY, build_crypt_table, hash_string};
+use mpq_parser::hash::parse_hash_table_entries;
+use mpq_parser::{MpqHeader, MpqParseError, MpqUserDataHeader};
+
+use crate::details::decode_replay_details;
+use crate::events::{TrackerEvent, decode_tracker_events};
+use crate::player::Player;
+
+/// A fully decoded replay: everything currently extracted from
+/// `replay.details` and `replay.tracker.events`.
+#[derive(Debug)]
+pub struct Replay {
+    pub map_name: String,
+    pub players: Vec<Player>,
+    pub tracker_events: Vec<TrackerEvent>,
+}
+
+/// Errors that can occur while loading a replay end-to-end.
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    #[error("failed to read replay file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse MPQ container: {0}")]
+    Mpq(#[from] MpqParseError),
+    #[error("required internal file not found in archive: {0}")]
+    MissingFile(&'static str),
+}
+
+/// Loads and fully decodes a `.SC2Replay` file from `path`.
+///
+/// Equivalent to running the MPQ container pipeline (header → hash table
+/// → block table → file lookup/extraction) followed by protocol
+/// decoding of `replay.details` and `replay.tracker.events`, in one call.
+pub fn load_replay(path: &str) -> Result<Replay, ReplayError> {
+    let bytes = std::fs::read(path)?;
+
+    let user_header = MpqUserDataHeader::parse(&bytes)?;
+    let offset = user_header.header_offset as usize;
+    let mpq_header = MpqHeader::parse(&bytes[offset..])?;
+
+    let crypt_table = build_crypt_table();
+
+    let ht_start = offset + mpq_header.hash_table_position as usize;
+    let ht_size = mpq_header.hash_table_size as usize * 16;
+    let ht_key = hash_string("(hash table)", MPQ_HASH_FILE_KEY, &crypt_table);
+    let ht_decrypted = decrypt(&bytes[ht_start..ht_start + ht_size], ht_key, &crypt_table);
+    let hash_entries = parse_hash_table_entries(&ht_decrypted);
+
+    let bt_start = offset + mpq_header.block_table_position as usize;
+    let bt_size = mpq_header.block_table_size as usize * 16;
+    let bt_key = hash_string("(block table)", MPQ_HASH_FILE_KEY, &crypt_table);
+    let bt_decrypted = decrypt(&bytes[bt_start..bt_start + bt_size], bt_key, &crypt_table);
+    let block_entries = parse_block_table_entries(&bt_decrypted);
+
+    let details_block = find_file(
+        "replay.details",
+        &hash_entries,
+        &block_entries,
+        &crypt_table,
+    )
+    .ok_or(ReplayError::MissingFile("replay.details"))?;
+    let details_bytes = extract_file(&bytes, offset as u32, *details_block)?;
+    let details = decode_replay_details(&details_bytes);
+
+    let tracker_block = find_file(
+        "replay.tracker.events",
+        &hash_entries,
+        &block_entries,
+        &crypt_table,
+    )
+    .ok_or(ReplayError::MissingFile("replay.tracker.events"))?;
+    let tracker_bytes = extract_file(&bytes, offset as u32, *tracker_block)?;
+    let tracker_events = decode_tracker_events(&tracker_bytes);
+
+    Ok(Replay {
+        map_name: details.map_name,
+        players: details.players,
+        tracker_events,
+    })
+}
