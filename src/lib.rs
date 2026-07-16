@@ -1,5 +1,6 @@
 #[macro_use]
 mod macros;
+mod typeinfos;
 
 pub mod bitpacked;
 pub mod details;
