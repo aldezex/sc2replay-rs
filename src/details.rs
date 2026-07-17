@@ -71,7 +71,6 @@ pub fn decode_replay_details(bytes: &[u8]) -> ReplayDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::player::PlayerResult;
 
     #[test]
