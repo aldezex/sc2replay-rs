@@ -58,7 +58,13 @@ pub fn load_replay(path: &str) -> Result<Replay, ReplayError> {
     let offset = user_header.header_offset as usize;
     let mpq_header = MpqHeader::parse(&bytes[offset..])?;
 
-    let crypt_table = build_crypt_table();
+    // The crypt table is a fixed 0x500-entry constant — computed once
+    // per process instead of once per replay, which matters for batch
+    // workloads loading hundreds of replays (and is free to share
+    // across threads).
+    static CRYPT_TABLE: std::sync::OnceLock<[u32; mpq_parser::crypto::CRYPT_TABLE_SIZE]> =
+        std::sync::OnceLock::new();
+    let crypt_table = *CRYPT_TABLE.get_or_init(build_crypt_table);
 
     let ht_start = offset + mpq_header.hash_table_position as usize;
     let ht_size = mpq_header.hash_table_size as usize * 16;

@@ -485,7 +485,11 @@ fn decode_player_stats(bytes: &[u8], pos: &mut usize, gameloop: i64) -> TrackerE
 pub fn decode_tracker_events(bytes: &[u8]) -> Vec<TrackerEvent> {
     let mut pos = 0;
     let mut gameloop = 0;
-    let mut events = Vec::new();
+    // Rough events-per-byte estimate (real streams measure ~35-60
+    // bytes/event) to pre-size the vector — an upper-ish guess only
+    // trades a little memory for skipping most grow-and-copy cycles on
+    // multi-thousand-event streams; correctness is unaffected either way.
+    let mut events = Vec::with_capacity(bytes.len() / 32);
 
     while pos < bytes.len() {
         let delta = read_choice_as_int(bytes, &mut pos);

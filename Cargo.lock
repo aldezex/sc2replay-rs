@@ -75,9 +75,9 @@ dependencies = [
 
 [[package]]
 name = "mpq-parser"
-version = "0.1.9"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e7b4a371a1f95136255a3dcb56ca5eb7bef175fa99c8003ec932e71171864ab"
+checksum = "b5938951bf8c656167af70ab9faa50578efd4283da3c62d556372617d91af319"
 dependencies = [
  "bzip2",
  "flate2",
@@ -133,7 +133,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "sc2reader-rs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mpq-parser",
  "regex",

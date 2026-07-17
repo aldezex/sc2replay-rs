@@ -1,12 +1,12 @@
 [package]
 name = "sc2reader-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "SC2 Replays parser"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/aldezex/sc2reader-rs"
 
 [dependencies]
-mpq-parser = "0.1.9"
+mpq-parser = "0.2.0"
 regex = "1.13.1"
 thiserror = "2.0.18"

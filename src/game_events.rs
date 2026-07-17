@@ -590,7 +590,12 @@ pub fn decode_game_events(bytes: &[u8]) -> Result<Vec<GameEvent>, GameEventsErro
     let mut bit_pos = 0usize;
     let mut gameloop: i64 = 0;
     let total_bits = bytes.len() * 8;
-    let mut events = Vec::new();
+    // Pre-size on a rough bytes-per-event estimate (same rationale as
+    // decode_tracker_events' pre-sizing): only Cmd/SelectionDelta/
+    // ControlGroupUpdate events actually materialize, so this slightly
+    // over-reserves; a wrong guess costs a little memory, never
+    // correctness.
+    let mut events = Vec::with_capacity(bytes.len() / 48);
 
     while bit_pos < total_bits {
         let delta = read_var_uint32(bytes, &mut bit_pos);
