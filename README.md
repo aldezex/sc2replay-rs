@@ -58,6 +58,10 @@ See the [mpq-parser README](https://github.com/aldezex/mpq-parser) for the full 
 
 **Also out of scope:** ability-ID → human-readable name mapping (`abil_link`/`abil_cmd_index` → "Train SCV") requires a `CommandCard` data table not present in `protocol97425.py`; callers get raw numeric ids.
 
+### Completed (API — in-memory loading, 0.4.0)
+
+- [x] **`load_replay_from_bytes(&[u8]) -> Result<Replay, ReplayError>`** (`replay.rs`): decodes a replay already held in memory (HTTP upload, object-storage download) without a backing file. The whole pipeline always operated on byte slices internally; `load_replay(path)` is now a thin `std::fs::read` wrapper over this entry point. Verified against the real fixture (byte-based and path-based loads decode to identical structures) plus malformed-input tests (garbage/empty bytes error instead of panicking).
+
 ### In progress / next up
 
 - [ ] Ability-ID → unit/building-name mapping (`CommandCard` data), needed to turn raw `abil_link`/`abil_cmd_index` pairs into readable build-order entries.

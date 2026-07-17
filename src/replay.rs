@@ -52,9 +52,18 @@ pub enum ReplayError {
 /// of `replay.details`, `replay.tracker.events`, and `replay.game.events`,
 /// in one call.
 pub fn load_replay(path: &str) -> Result<Replay, ReplayError> {
-    let bytes = std::fs::read(path)?;
+    load_replay_from_bytes(&std::fs::read(path)?)
+}
 
-    let user_header = MpqUserDataHeader::parse(&bytes)?;
+/// Loads and fully decodes a `.SC2Replay` already held in memory.
+///
+/// The whole pipeline operates on byte slices internally, so consumers
+/// that receive replay bytes without a backing file — an HTTP upload, an
+/// object-storage download — can decode directly instead of round-tripping
+/// through a temp file. [`load_replay`] is a thin convenience wrapper over
+/// this function.
+pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
+    let user_header = MpqUserDataHeader::parse(bytes)?;
     let offset = user_header.header_offset as usize;
     let mpq_header = MpqHeader::parse(&bytes[offset..])?;
 
