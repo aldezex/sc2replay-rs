@@ -1,16 +1,19 @@
 //! Decoding of `replay.game.events`: player-issued commands (unit
-//! training, building placement, move/attack orders, ability use).
+//! training, building placement, move/attack orders, ability use) and
+//! unit-selection state changes.
 //!
-//! Only `NNet.Game.SCmdEvent` (event id 27, typeid 100 in `protocol97425`)
-//! is fully modeled with named fields. Every other `NNet.Game.*Event`
-//! type is generically **skipped** rather than modeled: unlike
-//! `VersionedDecoder`, `BitPackedDecoder` has no type tags, so a value of
-//! unknown type can't be skipped by a simple recursive "skip whatever
-//! tag you find" the way [`crate::protocol::skip_value`] does. Instead,
-//! [`skip_bitpacked_value`] looks up the event's typeid's structure in
-//! [`crate::typeinfos`] (a Rust transcription of `protocol97425.py`'s
-//! `typeinfos` table) and computes exactly how many bits it occupies,
-//! recursively, without needing to interpret its contents.
+//! `NNet.Game.SCmdEvent` (event id 27, typeid 100), `SSelectionDeltaEvent`
+//! (event id 28, typeid 109), and `SControlGroupUpdateEvent` (event id 29,
+//! typeid 110) are fully modeled with named fields. Every other
+//! `NNet.Game.*Event` type is generically **skipped** rather than
+//! modeled: unlike `VersionedDecoder`, `BitPackedDecoder` has no type
+//! tags, so a value of unknown type can't be skipped by a simple
+//! recursive "skip whatever tag you find" the way
+//! [`crate::protocol::skip_value`] does. Instead, [`skip_bitpacked_value`]
+//! looks up the event's typeid's structure in [`crate::typeinfos`] (a
+//! Rust transcription of `protocol97425.py`'s `typeinfos` table) and
+//! computes exactly how many bits it occupies, recursively, without
+//! needing to interpret its contents.
 //!
 //! An event id that isn't present in `game_event_types` at all (as
 //! opposed to one that's present but unmodeled) is a genuinely unknown
@@ -21,20 +24,33 @@
 //! table.
 //!
 //! Field layout cross-checked directly against `protocol97425.py`'s
-//! `typeinfos` (indices 0, 2, 6, 8, 10, 25, 43, 47, 60, 83, 91-100).
+//! `typeinfos` (indices 0, 2, 6, 8, 10, 25, 43, 47, 60, 83, 91-110), all
+//! fetched from the reference source directly (not hand-transcribed from
+//! memory) — see each decode function's doc comment for the specific
+//! field names confirmed.
 
 use crate::bitpacked::{
-    byte_align, read_aligned_bytes, read_int, read_optional, read_optional_int, read_var_uint32,
+    byte_align, read_aligned_bytes, read_bits, read_int, read_optional, read_optional_int,
+    read_var_uint32,
 };
 use crate::typeinfos::{TypeInfo, typeinfo};
 
-/// A decoded `replay.game.events` entry. Only one variant exists today
-/// (`Cmd`); the enum shape leaves room for future `NNet.Game.*Event`
-/// types without an API break.
+/// A decoded `replay.game.events` entry. Three variants are fully
+/// modeled (`Cmd`, `SelectionDelta`, `ControlGroupUpdate`); the enum
+/// shape leaves room for more `NNet.Game.*Event` types without an API
+/// break — **`match`ing this exhaustively without a wildcard arm is not
+/// guaranteed to keep compiling across versions of this crate.**
 #[derive(Debug, Clone)]
 pub enum GameEvent {
-    /// `NNet.Game.SCmdEvent` (event id 27).
+    /// `NNet.Game.SCmdEvent` (event id 27, typeid 100).
     Cmd(CmdEvent),
+    /// `NNet.Game.SSelectionDeltaEvent` (event id 28, typeid 109): a
+    /// player's current unit selection changed (click, drag-select, or
+    /// a control-group recall).
+    SelectionDelta(SelectionDeltaEvent),
+    /// `NNet.Game.SControlGroupUpdateEvent` (event id 29, typeid 110): a
+    /// player set/added-to/recalled a numbered control group (hotkey).
+    ControlGroupUpdate(ControlGroupUpdateEvent),
 }
 
 /// A player-issued command (`SCmdEvent`, typeid 100).
@@ -93,6 +109,97 @@ pub struct TargetUnit {
     pub snapshot_control_player_id: Option<i64>,
     pub snapshot_upkeep_player_id: Option<i64>,
     pub snapshot_point: Point3,
+}
+
+/// `m_removeMask`/`m_mask` (typeid 104): a `_choice` describing which of
+/// a *previous* selection's units are affected, encoded whichever way
+/// is more compact for the given selection size. Confirmed verbatim
+/// against `protocol97425.py`: `_choice([(0,2),{0:('None',94),
+/// 1:('Mask',102),2:('OneIndices',103),3:('ZeroIndices',103)}])`.
+///
+/// `Mask`'s bits are in *subgroup order* (the order units appear in the
+/// selection's flattened subgroup list, not by tag) — this crate does
+/// not reconstruct that order, so `Mask`/`OneIndices`/`ZeroIndices` are
+/// exposed as raw index data for callers that want to attempt it, not
+/// resolved to unit tags here.
+#[derive(Debug, Clone)]
+pub enum SelectionMask {
+    None,
+    /// A bitarray of `len` bits (typeid 102: `_bitarray(bound=(0,9))`),
+    /// one per previously-selected unit in subgroup order. The raw bits
+    /// aren't captured here — a selection can exceed 64 units, more
+    /// than fits in one machine word — only the length is exposed,
+    /// consistent with this type's "not resolved to unit tags" scope
+    /// note above.
+    Mask { len: u32 },
+    /// Indices (into the previous selection's subgroup order) whose bit
+    /// is 1.
+    OneIndices(Vec<i64>),
+    /// Indices (into the previous selection's subgroup order) whose bit
+    /// is 0.
+    ZeroIndices(Vec<i64>),
+}
+
+/// One entry of `m_addSubgroups` (typeid 105): a batch of newly-added
+/// units sharing the same unit type/priority, added to the current
+/// selection. Confirmed verbatim against `protocol97425.py`:
+/// `_struct([('m_unitLink',83,-4),('m_subgroupPriority',10,-3),
+/// ('m_intraSubgroupPriority',10,-2),('m_count',101,-1)])`.
+#[derive(Debug, Clone, Copy)]
+pub struct AddSubgroup {
+    pub unit_link: i64,
+    pub subgroup_priority: i64,
+    pub intra_subgroup_priority: i64,
+    pub count: i64,
+}
+
+/// `NNet.Game.SSelectionDeltaEvent` (event id 28, typeid 109): a
+/// player's current unit selection changed. Confirmed verbatim against
+/// `protocol97425.py`: typeid 109 is `_struct([('m_controlGroupId',1,-7),
+/// ('m_delta',108,-6)])`, and typeid 108 (`m_delta`) is
+/// `_struct([('m_subgroupIndex',101,-4),('m_removeMask',104,-3),
+/// ('m_addSubgroups',106,-2),('m_addUnitTags',107,-1)])`.
+///
+/// [`Self::add_unit_tags`] is the field most relevant to callers: it
+/// directly lists the raw unit tags (same `tag` encoding as
+/// [`TargetUnit::tag`]) newly added to the selection — e.g. by clicking
+/// a production structure. This crate does not attempt to reconstruct
+/// the *full* current selection (that requires tracking subgroup order
+/// across events to resolve [`SelectionMask`] removals to specific
+/// tags) — see the module doc's scope note.
+#[derive(Debug, Clone)]
+pub struct SelectionDeltaEvent {
+    pub gameloop: i64,
+    pub user_id: i64,
+    pub control_group_id: i64,
+    pub subgroup_index: i64,
+    pub remove_mask: SelectionMask,
+    pub add_subgroups: Vec<AddSubgroup>,
+    pub add_unit_tags: Vec<i64>,
+}
+
+/// `NNet.Game.SControlGroupUpdateEvent` (event id 29, typeid 110): a
+/// player set/added-to/recalled a numbered control group (hotkey).
+/// Confirmed verbatim against `protocol97425.py`:
+/// `_struct([('m_controlGroupIndex',1,-8),('m_controlGroupUpdate',12,-7),
+/// ('m_mask',104,-6)])`.
+///
+/// [`Self::control_group_update`]'s meaning (cross-checked against the
+/// `sc2reader` Python project's `create_control_group_event`, since
+/// `protocol97425.py` itself doesn't name the enum values): `0` = Set
+/// (replace the group's contents with the current selection), `1` = Add
+/// (add the current selection to the group), `2` = Get/Recall (replace
+/// the current selection with the group's contents), `3` = a rarer
+/// "steal" variant whose exact semantics aren't pinned down by either
+/// source — exposed as a raw `i64`, not an enum, so callers can decide
+/// how to handle `3` themselves.
+#[derive(Debug, Clone)]
+pub struct ControlGroupUpdateEvent {
+    pub gameloop: i64,
+    pub user_id: i64,
+    pub control_group_index: i64,
+    pub control_group_update: i64,
+    pub mask: SelectionMask,
 }
 
 /// Errors decoding `replay.game.events`.
@@ -168,6 +275,89 @@ fn decode_cmd_event(bytes: &[u8], bit_pos: &mut usize, gameloop: i64, user_id: i
         sequence: read_int(bytes, bit_pos, 1, 32),
         other_unit: read_optional_int(bytes, bit_pos, 0, 32),
         unit_group: read_optional_int(bytes, bit_pos, 0, 32),
+    }
+}
+
+/// Decodes an `m_removeMask`/`m_mask` value (typeid 104).
+fn decode_selection_mask(bytes: &[u8], bit_pos: &mut usize) -> SelectionMask {
+    match read_int(bytes, bit_pos, 0, 2) {
+        0 => SelectionMask::None,
+        1 => {
+            // typeid 102: _bitarray(bound=(0,9)) -- a 9-bit length
+            // prefix, then that many further (unaligned) bits, same
+            // shape as skip_bitpacked_value's own BitArray handling.
+            let len = read_int(bytes, bit_pos, 0, 9) as u32;
+            let _ = read_bits(bytes, bit_pos, len);
+            SelectionMask::Mask { len }
+        }
+        2 => SelectionMask::OneIndices(read_int9_array(bytes, bit_pos)),
+        3 => SelectionMask::ZeroIndices(read_int9_array(bytes, bit_pos)),
+        _ => unreachable!("2-bit selector is always 0..=3"),
+    }
+}
+
+/// `_array(bound=(0,9), element=_int(0,9))` — the shape shared by
+/// `OneIndices`/`ZeroIndices` (typeid 103).
+fn read_int9_array(bytes: &[u8], bit_pos: &mut usize) -> Vec<i64> {
+    let count = read_int(bytes, bit_pos, 0, 9);
+    (0..count).map(|_| read_int(bytes, bit_pos, 0, 9)).collect()
+}
+
+/// Decodes one `m_addSubgroups` entry (typeid 105).
+fn decode_add_subgroup(bytes: &[u8], bit_pos: &mut usize) -> AddSubgroup {
+    AddSubgroup {
+        unit_link: read_int(bytes, bit_pos, 0, 16),
+        subgroup_priority: read_int(bytes, bit_pos, 0, 8),
+        intra_subgroup_priority: read_int(bytes, bit_pos, 0, 8),
+        count: read_int(bytes, bit_pos, 0, 9),
+    }
+}
+
+/// Decodes an `SSelectionDeltaEvent` body (typeid 109), fields read
+/// positionally per `protocol97425.py`'s `typeinfos[109]`/`typeinfos[108]`.
+fn decode_selection_delta_event(
+    bytes: &[u8],
+    bit_pos: &mut usize,
+    gameloop: i64,
+    user_id: i64,
+) -> SelectionDeltaEvent {
+    let control_group_id = read_int(bytes, bit_pos, 0, 4);
+    let subgroup_index = read_int(bytes, bit_pos, 0, 9);
+    let remove_mask = decode_selection_mask(bytes, bit_pos);
+    let add_subgroups_count = read_int(bytes, bit_pos, 0, 9);
+    let add_subgroups = (0..add_subgroups_count)
+        .map(|_| decode_add_subgroup(bytes, bit_pos))
+        .collect();
+    let add_unit_tags_count = read_int(bytes, bit_pos, 0, 9);
+    let add_unit_tags = (0..add_unit_tags_count)
+        .map(|_| read_int(bytes, bit_pos, 0, 32))
+        .collect();
+
+    SelectionDeltaEvent {
+        gameloop,
+        user_id,
+        control_group_id,
+        subgroup_index,
+        remove_mask,
+        add_subgroups,
+        add_unit_tags,
+    }
+}
+
+/// Decodes an `SControlGroupUpdateEvent` body (typeid 110), fields read
+/// positionally per `protocol97425.py`'s `typeinfos[110]`.
+fn decode_control_group_update_event(
+    bytes: &[u8],
+    bit_pos: &mut usize,
+    gameloop: i64,
+    user_id: i64,
+) -> ControlGroupUpdateEvent {
+    ControlGroupUpdateEvent {
+        gameloop,
+        user_id,
+        control_group_index: read_int(bytes, bit_pos, 0, 4),
+        control_group_update: read_int(bytes, bit_pos, 0, 3),
+        mask: decode_selection_mask(bytes, bit_pos),
     }
 }
 
@@ -383,9 +573,10 @@ fn typeid_for_event(event_id: i64) -> Option<usize> {
 ///
 /// Each event is prefixed by a gameloop delta ([`read_var_uint32`]) and a
 /// user id (`replay_userid_typeid`, typeid 8 -> typeid 2: `_int(0,5)`),
-/// then a 7-bit event id (`game_eventid_typeid`, typeid 0). Event id 27
-/// (`SCmdEvent`) is decoded fully; every other id present in
-/// `game_event_types` is skipped via [`skip_bitpacked_value`] without
+/// then a 7-bit event id (`game_eventid_typeid`, typeid 0). Event ids 27
+/// (`SCmdEvent`), 28 (`SSelectionDeltaEvent`), and 29
+/// (`SControlGroupUpdateEvent`) are decoded fully; every other id present
+/// in `game_event_types` is skipped via [`skip_bitpacked_value`] without
 /// being modeled; an id absent from `game_event_types` entirely returns
 /// [`GameEventsError::UnsupportedEventId`] (see the module doc). After
 /// each event, the stream re-aligns to the next byte boundary.
@@ -411,6 +602,22 @@ pub fn decode_game_events(bytes: &[u8]) -> Result<Vec<GameEvent>, GameEventsErro
         match typeid_for_event(event_id) {
             Some(100) => {
                 events.push(GameEvent::Cmd(decode_cmd_event(
+                    bytes,
+                    &mut bit_pos,
+                    gameloop,
+                    user_id,
+                )));
+            }
+            Some(109) => {
+                events.push(GameEvent::SelectionDelta(decode_selection_delta_event(
+                    bytes,
+                    &mut bit_pos,
+                    gameloop,
+                    user_id,
+                )));
+            }
+            Some(110) => {
+                events.push(GameEvent::ControlGroupUpdate(decode_control_group_update_event(
                     bytes,
                     &mut bit_pos,
                     gameloop,
@@ -459,6 +666,138 @@ mod tests {
         assert!(event.other_unit.is_none());
         assert!(event.unit_group.is_none());
         assert_eq!(bit_pos, 64);
+    }
+
+    /// Writes `n` bits of `value` starting at `*bit_pos`, using the exact
+    /// inverse of [`crate::bitpacked::read_bits`]'s chunking algorithm
+    /// (byte-boundary-aligned chunks, earlier chunks more significant) —
+    /// lets tests build realistic multi-field bitstreams by value instead
+    /// of hand-computing raw bytes.
+    fn write_bits(bytes: &mut Vec<u8>, bit_pos: &mut usize, value: u64, n: u32) {
+        let mut remaining = n;
+        while remaining > 0 {
+            let byte_idx = *bit_pos / 8;
+            let bit_offset = (*bit_pos % 8) as u32;
+            while bytes.len() <= byte_idx {
+                bytes.push(0);
+            }
+            let space_in_byte = 8 - bit_offset;
+            let copy_bits = remaining.min(space_in_byte);
+            let chunk = (value >> (remaining - copy_bits)) & ((1u64 << copy_bits) - 1);
+            bytes[byte_idx] |= (chunk as u8) << bit_offset;
+            *bit_pos += copy_bits as usize;
+            remaining -= copy_bits;
+        }
+    }
+
+    #[test]
+    fn write_bits_round_trips_through_read_bits() {
+        // Sanity-checks the test helper itself against the already-proven
+        // reader before trusting it in the events tests below.
+        let mut bytes = Vec::new();
+        let mut write_pos = 0;
+        write_bits(&mut bytes, &mut write_pos, 18, 12);
+        assert_eq!(bytes, vec![0x01, 0x02]);
+
+        let mut read_pos = 0;
+        assert_eq!(read_bits(&bytes, &mut read_pos, 12), 18);
+    }
+
+    #[test]
+    fn decodes_minimal_all_zero_selection_delta_event() {
+        // control_group_id(4) + subgroup_index(9) + remove_mask selector
+        // (2, ->None) + add_subgroups count(9, ->0 elements) +
+        // add_unit_tags count(9, ->0 elements) = 33 bits.
+        let bytes = [0u8; 5];
+        let mut bit_pos = 0;
+
+        let event = decode_selection_delta_event(&bytes, &mut bit_pos, 42, 3);
+
+        assert_eq!(event.gameloop, 42);
+        assert_eq!(event.user_id, 3);
+        assert_eq!(event.control_group_id, 0);
+        assert_eq!(event.subgroup_index, 0);
+        assert!(matches!(event.remove_mask, SelectionMask::None));
+        assert!(event.add_subgroups.is_empty());
+        assert!(event.add_unit_tags.is_empty());
+        assert_eq!(bit_pos, 33);
+    }
+
+    #[test]
+    fn selection_delta_event_exposes_newly_added_unit_tags() {
+        // Builds a realistic delta: control_group_id=0, subgroup_index=0,
+        // remove_mask=None, no add_subgroups, one add_unit_tags entry
+        // encoding a real TargetUnit-style tag (unit_tag_index=5,
+        // unit_tag_recycle=1 -> tag = (5<<18)|1).
+        let tag = (5i64 << 18) | 1;
+        let mut bytes = Vec::new();
+        let mut pos = 0;
+        write_bits(&mut bytes, &mut pos, 0, 4); // control_group_id
+        write_bits(&mut bytes, &mut pos, 0, 9); // subgroup_index
+        write_bits(&mut bytes, &mut pos, 0, 2); // remove_mask selector -> None
+        write_bits(&mut bytes, &mut pos, 0, 9); // add_subgroups count
+        write_bits(&mut bytes, &mut pos, 1, 9); // add_unit_tags count
+        write_bits(&mut bytes, &mut pos, tag as u64, 32);
+
+        let mut bit_pos = 0;
+        let event = decode_selection_delta_event(&bytes, &mut bit_pos, 100, 0);
+
+        assert_eq!(event.add_unit_tags, vec![tag]);
+        assert_eq!(bit_pos, pos);
+    }
+
+    #[test]
+    fn selection_delta_event_decodes_a_one_indices_remove_mask() {
+        let mut bytes = Vec::new();
+        let mut pos = 0;
+        write_bits(&mut bytes, &mut pos, 0, 4); // control_group_id
+        write_bits(&mut bytes, &mut pos, 0, 9); // subgroup_index
+        write_bits(&mut bytes, &mut pos, 2, 2); // remove_mask selector -> OneIndices
+        write_bits(&mut bytes, &mut pos, 2, 9); // OneIndices count = 2
+        write_bits(&mut bytes, &mut pos, 0, 9); // index 0
+        write_bits(&mut bytes, &mut pos, 3, 9); // index 3
+        write_bits(&mut bytes, &mut pos, 0, 9); // add_subgroups count
+        write_bits(&mut bytes, &mut pos, 0, 9); // add_unit_tags count
+
+        let mut bit_pos = 0;
+        let event = decode_selection_delta_event(&bytes, &mut bit_pos, 0, 0);
+
+        match event.remove_mask {
+            SelectionMask::OneIndices(indices) => assert_eq!(indices, vec![0, 3]),
+            other => panic!("expected OneIndices, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_minimal_all_zero_control_group_update_event() {
+        // control_group_index(4) + control_group_update(3) + mask
+        // selector(2, ->None) = 9 bits.
+        let bytes = [0u8; 2];
+        let mut bit_pos = 0;
+
+        let event = decode_control_group_update_event(&bytes, &mut bit_pos, 7, 1);
+
+        assert_eq!(event.gameloop, 7);
+        assert_eq!(event.user_id, 1);
+        assert_eq!(event.control_group_index, 0);
+        assert_eq!(event.control_group_update, 0);
+        assert!(matches!(event.mask, SelectionMask::None));
+        assert_eq!(bit_pos, 9);
+    }
+
+    #[test]
+    fn control_group_update_event_decodes_the_recall_update_type() {
+        let mut bytes = Vec::new();
+        let mut pos = 0;
+        write_bits(&mut bytes, &mut pos, 5, 4); // control_group_index
+        write_bits(&mut bytes, &mut pos, 2, 3); // control_group_update = 2 (Get/Recall)
+        write_bits(&mut bytes, &mut pos, 0, 2); // mask selector -> None
+
+        let mut bit_pos = 0;
+        let event = decode_control_group_update_event(&bytes, &mut bit_pos, 0, 0);
+
+        assert_eq!(event.control_group_index, 5);
+        assert_eq!(event.control_group_update, 2);
     }
 
     // skip_bitpacked_value tests below use real typeids from

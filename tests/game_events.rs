@@ -23,8 +23,9 @@ fn first_cmd_events_expose_fields_for_manual_cross_check() {
     let cmd_events: Vec<_> = replay
         .game_events
         .iter()
-        .map(|e| match e {
-            GameEvent::Cmd(c) => c,
+        .filter_map(|e| match e {
+            GameEvent::Cmd(c) => Some(c),
+            _ => None,
         })
         .take(5)
         .collect();
@@ -73,6 +74,114 @@ fn decodes_a_large_number_of_cmd_events_from_a_full_ladder_replay() {
         cmd_event_count > 50,
         "expected a substantial number of CmdEvents from a full 1v1 ladder replay, got {cmd_event_count}"
     );
+}
+
+#[test]
+fn decodes_a_substantial_number_of_selection_delta_events() {
+    // Every replay involves the player clicking/dragging to select units
+    // repeatedly -- a real 1v1 ladder replay decoding zero
+    // SelectionDelta events would indicate the dispatch wiring or field
+    // widths are wrong (silently falling through to skip_bitpacked_value
+    // or misaligning the stream), not that the player never selected
+    // anything.
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
+
+    let selection_event_count = replay
+        .game_events
+        .iter()
+        .filter(|e| matches!(e, GameEvent::SelectionDelta(_)))
+        .count();
+
+    assert!(
+        selection_event_count > 20,
+        "expected a substantial number of SelectionDelta events from a full 1v1 ladder replay, got {selection_event_count}"
+    );
+}
+
+#[test]
+fn most_selection_delta_events_add_at_least_one_unit_tag() {
+    // A SelectionDelta with an empty add_unit_tags is a pure deselection
+    // (rare relative to normal select/reselect activity) -- if the
+    // majority came back empty, that would suggest add_unit_tags_count
+    // is being misread (e.g. off-by-one field ordering) rather than a
+    // real behavioral pattern.
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
+
+    let selection_events: Vec<_> = replay
+        .game_events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::SelectionDelta(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert!(!selection_events.is_empty());
+
+    let with_added_tags = selection_events
+        .iter()
+        .filter(|s| !s.add_unit_tags.is_empty())
+        .count();
+
+    assert!(
+        with_added_tags * 2 > selection_events.len(),
+        "expected most SelectionDelta events to add at least one unit tag, got {with_added_tags}/{}",
+        selection_events.len()
+    );
+}
+
+#[test]
+fn selection_delta_added_unit_tags_decode_to_plausible_indices() {
+    // A unit tag is (unit_tag_index << 18) | unit_tag_recycle (confirmed
+    // empirically in sc2trainer against a known Hatchery's tag). If
+    // add_unit_tags were being decoded from the wrong bit offset, the
+    // resulting unit_tag_index values would be implausibly huge or
+    // negative -- real replays only ever have a few thousand units
+    // total, so every decoded index should land in a sane range.
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
+
+    let mut checked_any = false;
+    for event in &replay.game_events {
+        if let GameEvent::SelectionDelta(s) = event {
+            for &tag in &s.add_unit_tags {
+                let unit_tag_index = tag >> 18;
+                assert!(
+                    (0..100_000).contains(&unit_tag_index),
+                    "implausible unit_tag_index {unit_tag_index} decoded from tag {tag}"
+                );
+                checked_any = true;
+            }
+        }
+    }
+    assert!(checked_any, "expected at least one add_unit_tags entry across the replay");
+}
+
+#[test]
+fn decodes_control_group_update_events_with_a_known_update_type() {
+    // control_group_update is a 3-bit field but only 0-3 are known,
+    // documented update types (Set/Add/Recall/"steal", see
+    // ControlGroupUpdateEvent's doc comment) -- every decoded value
+    // landing in 0..=3 (out of a possible 0..=7 for 3 raw bits) is a
+    // plausibility check on the field's bit offset being correct.
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
+
+    let control_group_events: Vec<_> = replay
+        .game_events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::ControlGroupUpdate(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+
+    assert!(!control_group_events.is_empty());
+    for event in &control_group_events {
+        assert!(
+            (0..=3).contains(&event.control_group_update),
+            "unexpected control_group_update value {} (expected 0-3)",
+            event.control_group_update
+        );
+        assert!((0..10).contains(&event.control_group_index));
+    }
 }
 
 #[test]
