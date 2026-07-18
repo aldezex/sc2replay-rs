@@ -75,9 +75,9 @@ dependencies = [
 
 [[package]]
 name = "mpq-parser"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5938951bf8c656167af70ab9faa50578efd4283da3c62d556372617d91af319"
+checksum = "db52ddc44c4f8011f6dc7f0fb2bcb9c630040389d72e9b52e5917f9c5f44233b"
 dependencies = [
  "bzip2",
  "flate2",
