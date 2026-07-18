@@ -22,6 +22,19 @@ fn load_replay_from_bytes_matches_load_replay() {
 }
 
 #[test]
+fn decodes_the_game_build_from_the_real_fixture() {
+    // The fixture was recorded on build 97425 (5.0.x) — this crate's
+    // reference protocol build. Exact-value assertion so a regression in
+    // header decoding (or an accidental offset change) is caught, not
+    // just "some non-zero number".
+    let replay = sc2reader_rs::replay::load_replay(FIXTURE).expect("failed to load");
+    assert_eq!(replay.version.base_build, 97425);
+    assert_eq!(replay.version.build, 97425);
+    assert_eq!(replay.version.major, 5);
+    assert_eq!(replay.version.minor, 0);
+}
+
+#[test]
 fn load_replay_from_bytes_rejects_garbage_without_panicking() {
     // Malformed input must surface as an error, never a panic — the
     // serverless upload path feeds arbitrary user bytes into this.

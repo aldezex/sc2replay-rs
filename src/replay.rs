@@ -15,12 +15,18 @@ use mpq_parser::{MpqHeader, MpqParseError, MpqUserDataHeader};
 use crate::details::decode_replay_details;
 use crate::events::{TrackerEvent, decode_tracker_events};
 use crate::game_events::{GameEvent, GameEventsError, decode_game_events};
+use crate::header::{ReplayVersion, decode_replay_version};
 use crate::player::Player;
 
-/// A fully decoded replay: everything currently extracted from
-/// `replay.details`, `replay.tracker.events`, and `replay.game.events`.
+/// A fully decoded replay: everything currently extracted from the header
+/// (game version/build), `replay.details`, `replay.tracker.events`, and
+/// `replay.game.events`.
 #[derive(Debug)]
 pub struct Replay {
+    /// The SC2 game build/version this replay was recorded on — lets a
+    /// consumer branch on patch-specific balance constants (e.g. 5.0.16 /
+    /// build 97563).
+    pub version: ReplayVersion,
     pub map_name: String,
     pub players: Vec<Player>,
     pub tracker_events: Vec<TrackerEvent>,
@@ -64,6 +70,7 @@ pub fn load_replay(path: &str) -> Result<Replay, ReplayError> {
 /// this function.
 pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
     let user_header = MpqUserDataHeader::parse(bytes)?;
+    let version = decode_replay_version(bytes);
     let offset = user_header.header_offset as usize;
     let mpq_header = MpqHeader::parse(&bytes[offset..])?;
 
@@ -118,6 +125,7 @@ pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
     let game_events = decode_game_events(&game_events_bytes)?;
 
     Ok(Replay {
+        version,
         map_name: details.map_name,
         players: details.players,
         tracker_events,
