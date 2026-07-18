@@ -3,6 +3,11 @@ use crate::{
     protocol::{read_array, read_blob, read_optional, read_struct, read_tagged_int, skip_value},
 };
 
+/// Field index of `m_workingSetSlotId` in `SPlayerListEntry` — an
+/// `optional<int(0,8)>` that indexes into `replay.initData`'s lobby slot
+/// array. Verified identical across protocol builds 95248/97425/97563.
+const FIELD_WORKING_SET_SLOT_ID: i64 = 9;
+
 /// Decoded contents of a replay's `replay.details` file: the map name
 /// and the list of players, already resolved to readable text.
 pub struct ReplayDetails {
@@ -22,6 +27,7 @@ fn decode_player(bytes: &[u8], pos: &mut usize) -> Player {
     let mut name = String::new();
     let mut race = String::new();
     let mut result = crate::player::PlayerResult::Undecided;
+    let mut working_set_slot_id = None;
 
     read_struct(bytes, pos, |b, p, field_index| match field_index {
         0 => name = String::from_utf8_lossy(read_blob(b, p)).to_string(),
@@ -34,11 +40,15 @@ fn decode_player(bytes: &[u8], pos: &mut usize) -> Player {
                 _ => crate::player::PlayerResult::Undecided,
             };
         }
+        FIELD_WORKING_SET_SLOT_ID => {
+            working_set_slot_id = read_optional(b, p, read_tagged_int);
+        }
         _ => skip_value(b, p).unwrap(),
     });
 
     let mut player = Player::new(&name, &race);
     player.result = result;
+    player.working_set_slot_id = working_set_slot_id;
     player
 }
 

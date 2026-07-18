@@ -8,6 +8,7 @@ pub mod events;
 pub mod format;
 pub mod header;
 pub mod game_events;
+pub mod init_data;
 pub mod player;
 pub mod protocol;
 pub mod replay;

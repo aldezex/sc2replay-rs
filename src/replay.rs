@@ -16,6 +16,7 @@ use crate::details::decode_replay_details;
 use crate::events::{TrackerEvent, decode_tracker_events};
 use crate::game_events::{GameEvent, GameEventsError, decode_game_events};
 use crate::header::{ReplayVersion, decode_replay_version};
+use crate::init_data::{InitData, decode_init_data};
 use crate::player::Player;
 
 /// A fully decoded replay: everything currently extracted from the header
@@ -29,6 +30,11 @@ pub struct Replay {
     pub version: ReplayVersion,
     pub map_name: String,
     pub players: Vec<Player>,
+    /// The lobby slot list from `replay.initData`, chiefly the per-slot
+    /// MMR. Most consumers want [`Player::mmr`] instead — already joined
+    /// onto the players below; this is exposed for the cases where the
+    /// non-player slots (observers, casters) matter.
+    pub init_data: InitData,
     pub tracker_events: Vec<TrackerEvent>,
     pub game_events: Vec<GameEvent>,
 }
@@ -102,7 +108,31 @@ pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
     )
     .ok_or(ReplayError::MissingFile("replay.details"))?;
     let details_bytes = extract_file(bytes, offset as u32, *details_block)?;
-    let details = decode_replay_details(&details_bytes);
+    let mut details = decode_replay_details(&details_bytes);
+
+    let init_data_block = find_file(
+        "replay.initData",
+        &hash_entries,
+        &block_entries,
+        &crypt_table,
+    )
+    .ok_or(ReplayError::MissingFile("replay.initData"))?;
+    let init_data_bytes = extract_file(bytes, offset as u32, *init_data_block)?;
+    let init_data = decode_init_data(&init_data_bytes);
+
+    // Join lobby MMR onto the details players. `m_workingSetSlotId` is
+    // the authoritative link; if a replay omits it we leave `mmr` as
+    // `None` rather than guessing by name or by position — a wrong MMR
+    // is far worse than a missing one for the calibration work this
+    // feeds.
+    for player in &mut details.players {
+        if let Some(slot) = player.working_set_slot_id
+            && let Ok(slot) = usize::try_from(slot)
+            && let Some(user) = init_data.lobby_user(slot)
+        {
+            player.mmr = user.mmr;
+        }
+    }
 
     let tracker_block = find_file(
         "replay.tracker.events",
@@ -128,6 +158,7 @@ pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
         version,
         map_name: details.map_name,
         players: details.players,
+        init_data,
         tracker_events,
         game_events,
     })
