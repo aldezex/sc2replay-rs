@@ -51,6 +51,83 @@ pub enum GameEvent {
     /// `NNet.Game.SControlGroupUpdateEvent` (event id 29, typeid 110): a
     /// player set/added-to/recalled a numbered control group (hotkey).
     ControlGroupUpdate(ControlGroupUpdateEvent),
+    /// `NNet.Game.SCameraUpdateEvent` (event id 49, typeid 149): the
+    /// player's viewport moved — where they were *looking*.
+    CameraUpdate(CameraUpdateEvent),
+}
+
+/// A 2D camera-target coordinate (`m_target`, typeid 84), in **1/256 of a
+/// map tile**.
+///
+/// The protocol stores both components as bare `_int(0,16)`, so the raw
+/// values run 0..=65535 — i.e. 0..256 tiles, which covers every stock SC2
+/// map. Callers that want tile units (the same units
+/// [`Point3::x`]/[`Point3::y`] use once divided by 256, and the units
+/// `UnitBorn`/`UnitDied` report directly) should use [`Self::x_tiles`] /
+/// [`Self::y_tiles`] rather than dividing by hand.
+///
+/// The 1/256 scale is **empirically confirmed**, not assumed: on real
+/// replays the raw values span roughly 4k-46k, and dividing by 256 puts
+/// every camera target inside the playable area of the map and adjacent to
+/// the issuing player's own `UnitBorn` positions early in the game (see the
+/// crate's real-replay camera tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CameraTarget {
+    /// Raw x, in 1/256 tile.
+    pub x: i64,
+    /// Raw y, in 1/256 tile.
+    pub y: i64,
+}
+
+impl CameraTarget {
+    /// x in map tiles (raw / 256).
+    pub fn x_tiles(&self) -> f64 {
+        self.x as f64 / 256.0
+    }
+
+    /// y in map tiles (raw / 256).
+    pub fn y_tiles(&self) -> f64 {
+        self.y as f64 / 256.0
+    }
+}
+
+/// `NNet.Game.SCameraUpdateEvent` (event id 49, typeid 149): the player's
+/// viewport moved. Confirmed verbatim against `protocol97425.py`: typeid
+/// 149 is `_struct([('m_target',146,-5),('m_distance',147,-4),
+/// ('m_pitch',147,-3),('m_yaw',147,-2),('m_reason',148,-1),
+/// ('m_follow',13,0)])`, where 146 = `_optional(84)`, 84 =
+/// `_struct([('x',83,-2),('y',83,-1)])` with 83 = `_int(0,16)`, 147 =
+/// `_optional(83)`, and 148 = `_optional(116)` with 116 = `_int(0,8)`.
+///
+/// **[`Self::target`] is `None` for a minority of these events** —
+/// measured at ~13% over a 175-replay professional batch (1,758,534 of
+/// 2,022,571 camera events carried a target). Consumers must treat "no
+/// target" as "no information about where the player was looking" and
+/// carry the previous target forward themselves if they want a continuous
+/// viewport track; this crate does not fabricate one (see the project's
+/// exclude-rather-than-fabricate rule).
+///
+/// [`Self::distance`], [`Self::pitch`], [`Self::yaw`] and [`Self::reason`]
+/// were **absent in every camera event of all four verification
+/// fixtures**, and [`Self::follow`] was uniformly `false`. They are
+/// modelled because the protocol defines them, not because any observed
+/// replay populates them — do not build logic that assumes they carry
+/// data.
+#[derive(Debug, Clone)]
+pub struct CameraUpdateEvent {
+    pub gameloop: i64,
+    pub user_id: i64,
+    /// Where the camera centre moved to, in 1/256 tile — `None` when this
+    /// event carried no positional change (see the type doc).
+    pub target: Option<CameraTarget>,
+    pub distance: Option<i64>,
+    pub pitch: Option<i64>,
+    pub yaw: Option<i64>,
+    /// `m_reason`, exposed raw: `protocol97425.py` gives it no enum names
+    /// and no second source pins its values down, so this crate does not
+    /// invent an interpretation for it.
+    pub reason: Option<i64>,
+    pub follow: bool,
 }
 
 /// A player-issued command (`SCmdEvent`, typeid 100).
@@ -361,6 +438,34 @@ fn decode_control_group_update_event(
     }
 }
 
+/// Decodes an `m_target` value (typeid 84): two bare `_int(0,16)`s.
+fn decode_camera_target(bytes: &[u8], bit_pos: &mut usize) -> CameraTarget {
+    CameraTarget {
+        x: read_int(bytes, bit_pos, 0, 16),
+        y: read_int(bytes, bit_pos, 0, 16),
+    }
+}
+
+/// Decodes an `SCameraUpdateEvent` body (typeid 149), fields read
+/// positionally per `protocol97425.py`'s `typeinfos[149]`.
+fn decode_camera_update_event(
+    bytes: &[u8],
+    bit_pos: &mut usize,
+    gameloop: i64,
+    user_id: i64,
+) -> CameraUpdateEvent {
+    CameraUpdateEvent {
+        gameloop,
+        user_id,
+        target: read_optional(bytes, bit_pos, decode_camera_target),
+        distance: read_optional_int(bytes, bit_pos, 0, 16),
+        pitch: read_optional_int(bytes, bit_pos, 0, 16),
+        yaw: read_optional_int(bytes, bit_pos, 0, 16),
+        reason: read_optional_int(bytes, bit_pos, 0, 8),
+        follow: read_int(bytes, bit_pos, 0, 1) != 0,
+    }
+}
+
 /// Skips a value of the given `typeid` without interpreting its
 /// contents, by recursively looking up its structure in
 /// [`crate::typeinfos`] and consuming exactly the right number of bits.
@@ -629,6 +734,14 @@ pub fn decode_game_events(bytes: &[u8]) -> Result<Vec<GameEvent>, GameEventsErro
                     user_id,
                 )));
             }
+            Some(149) => {
+                events.push(GameEvent::CameraUpdate(decode_camera_update_event(
+                    bytes,
+                    &mut bit_pos,
+                    gameloop,
+                    user_id,
+                )));
+            }
             Some(other_typeid) => {
                 skip_bitpacked_value(bytes, &mut bit_pos, other_typeid)?;
             }
@@ -803,6 +916,86 @@ mod tests {
 
         assert_eq!(event.control_group_index, 5);
         assert_eq!(event.control_group_update, 2);
+    }
+
+    #[test]
+    fn decodes_minimal_all_zero_camera_update_event() {
+        // target presence(1, ->absent) + distance(1) + pitch(1) + yaw(1)
+        // + reason(1) + follow(1) = 6 bits, all zero.
+        let bytes = [0u8; 2];
+        let mut bit_pos = 0;
+
+        let event = decode_camera_update_event(&bytes, &mut bit_pos, 42, 3);
+
+        assert_eq!(event.gameloop, 42);
+        assert_eq!(event.user_id, 3);
+        assert!(event.target.is_none());
+        assert!(event.distance.is_none());
+        assert!(event.pitch.is_none());
+        assert!(event.yaw.is_none());
+        assert!(event.reason.is_none());
+        assert!(!event.follow);
+        assert_eq!(bit_pos, 6);
+    }
+
+    #[test]
+    fn camera_update_event_decodes_a_target() {
+        // The shape that actually occurs in real replays: a target and
+        // nothing else. 1 + 16 + 16 + 4 presence bits + 1 follow = 38 bits.
+        let mut bytes = Vec::new();
+        let mut pos = 0;
+        write_bits(&mut bytes, &mut pos, 1, 1); // target present
+        write_bits(&mut bytes, &mut pos, 9728, 16); // x = 38 tiles * 256
+        write_bits(&mut bytes, &mut pos, 36608, 16); // y = 143 tiles * 256
+        write_bits(&mut bytes, &mut pos, 0, 1); // distance absent
+        write_bits(&mut bytes, &mut pos, 0, 1); // pitch absent
+        write_bits(&mut bytes, &mut pos, 0, 1); // yaw absent
+        write_bits(&mut bytes, &mut pos, 0, 1); // reason absent
+        write_bits(&mut bytes, &mut pos, 0, 1); // follow = false
+
+        let mut bit_pos = 0;
+        let event = decode_camera_update_event(&bytes, &mut bit_pos, 100, 1);
+
+        let target = event.target.expect("target should be present");
+        assert_eq!(target.x, 9728);
+        assert_eq!(target.y, 36608);
+        // The 1/256 fixed-point scaling that consumers depend on.
+        assert_eq!(target.x_tiles(), 38.0);
+        assert_eq!(target.y_tiles(), 143.0);
+        assert_eq!(bit_pos, 38);
+        assert_eq!(bit_pos, pos);
+    }
+
+    #[test]
+    fn camera_update_event_decodes_every_optional_when_present() {
+        // Not observed in any real replay (see CameraUpdateEvent's doc),
+        // but the protocol defines these fields, so the decode path for
+        // them is pinned down rather than left untested.
+        let mut bytes = Vec::new();
+        let mut pos = 0;
+        write_bits(&mut bytes, &mut pos, 1, 1);
+        write_bits(&mut bytes, &mut pos, 1024, 16); // x
+        write_bits(&mut bytes, &mut pos, 2048, 16); // y
+        write_bits(&mut bytes, &mut pos, 1, 1);
+        write_bits(&mut bytes, &mut pos, 300, 16); // distance
+        write_bits(&mut bytes, &mut pos, 1, 1);
+        write_bits(&mut bytes, &mut pos, 45, 16); // pitch
+        write_bits(&mut bytes, &mut pos, 1, 1);
+        write_bits(&mut bytes, &mut pos, 90, 16); // yaw
+        write_bits(&mut bytes, &mut pos, 1, 1);
+        write_bits(&mut bytes, &mut pos, 7, 8); // reason
+        write_bits(&mut bytes, &mut pos, 1, 1); // follow = true
+
+        let mut bit_pos = 0;
+        let event = decode_camera_update_event(&bytes, &mut bit_pos, 0, 0);
+
+        assert_eq!(event.target.unwrap(), CameraTarget { x: 1024, y: 2048 });
+        assert_eq!(event.distance, Some(300));
+        assert_eq!(event.pitch, Some(45));
+        assert_eq!(event.yaw, Some(90));
+        assert_eq!(event.reason, Some(7));
+        assert!(event.follow);
+        assert_eq!(bit_pos, pos);
     }
 
     // skip_bitpacked_value tests below use real typeids from
