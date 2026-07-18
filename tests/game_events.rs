@@ -198,3 +198,105 @@ fn worker_training_supply_reservation_matches_expected_offset() {
     // exists (out of scope here); assert
     // `cmd_event.gameloop < corresponding_unit_born.gameloop`.
 }
+
+/// The Layer-0 gate from the scouting-fidelity design, as a permanent
+/// regression test: a camera decode that silently produces plausible-
+/// looking garbage is the worst possible outcome, so the properties that
+/// distinguish a real decode from a random one are asserted here rather
+/// than checked once by hand.
+///
+/// The map-bounds and own-base anchors below were verified across four
+/// distinct real replays (PvZ/ZvT/PvT/PvP) and the full 175-replay
+/// HomeStory Cup batch before this decode was built on; this test pins
+/// the strongest of those properties to a committed fixture.
+#[test]
+fn camera_update_events_decode_plausibly_on_a_real_replay() {
+    use sc2reader_rs::events::TrackerEvent;
+
+    let replay = load_replay(FIXTURE).expect("failed to load replay");
+
+    let cameras: Vec<_> = replay
+        .game_events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CameraUpdate(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !cameras.is_empty(),
+        "a real replay must contain camera events"
+    );
+
+    // Both players look at the map -- a decode that misreads the user id
+    // or the presence bits would collapse onto one user or none.
+    let mut users: Vec<i64> = cameras.iter().map(|c| c.user_id).collect();
+    users.sort();
+    users.dedup();
+    assert!(
+        users.len() >= 2,
+        "expected camera events from both players, got users {users:?}"
+    );
+
+    // Map extent from unit positions (tiles), which are decoded by an
+    // independent, long-proven code path -- so this cross-checks the
+    // camera decode against something it shares no bits with.
+    let (mut minx, mut miny, mut maxx, mut maxy) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for ev in &replay.tracker_events {
+        if let TrackerEvent::UnitBorn { x, y, .. } = ev {
+            minx = minx.min(*x);
+            miny = miny.min(*y);
+            maxx = maxx.max(*x);
+            maxy = maxy.max(*y);
+        }
+    }
+
+    // Camera centres may sit slightly outside the unit-occupied extent
+    // (edge scrolling), hence the margin; they may not sit anywhere near
+    // the 0..256-tile range the raw 16-bit encoding would allow if the
+    // 1/256 scaling were wrong.
+    let margin = 15.0;
+    let targets: Vec<(f64, f64)> = cameras
+        .iter()
+        .filter_map(|c| c.target.map(|t| (t.x_tiles(), t.y_tiles())))
+        .collect();
+    assert!(!targets.is_empty(), "expected at least one camera target");
+    for (x, y) in &targets {
+        assert!(
+            *x >= minx as f64 - margin
+                && *x <= maxx as f64 + margin
+                && *y >= miny as f64 - margin
+                && *y <= maxy as f64 + margin,
+            "camera target ({x:.1},{y:.1}) outside map extent \
+             [{minx}..{maxx}]x[{miny}..{maxy}] (+/-{margin})"
+        );
+    }
+
+    // The decisive property: a real camera track moves in small steps.
+    // Uniformly random points over the map would give a median step of
+    // roughly a third of the diagonal; the measured value across 748
+    // real player-replays was 0.5% of it, with a worst case of 17%.
+    let diag = (((maxx - minx).pow(2) + (maxy - miny).pow(2)) as f64).sqrt();
+    for user in &users {
+        let pts: Vec<(f64, f64)> = cameras
+            .iter()
+            .filter(|c| c.user_id == *user)
+            .filter_map(|c| c.target.map(|t| (t.x_tiles(), t.y_tiles())))
+            .collect();
+        if pts.len() < 20 {
+            continue;
+        }
+        let mut jumps: Vec<f64> = pts
+            .windows(2)
+            .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+            .collect();
+        jumps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = jumps[jumps.len() / 2];
+        assert!(
+            median < diag * 0.25,
+            "user {user}'s median camera step {median:.1} tiles is not \
+             distinguishable from a random walk (map diagonal {diag:.0})"
+        );
+    }
+}
