@@ -101,7 +101,7 @@ pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
         &crypt_table,
     )
     .ok_or(ReplayError::MissingFile("replay.details"))?;
-    let details_bytes = extract_file(&bytes, offset as u32, *details_block)?;
+    let details_bytes = extract_file(bytes, offset as u32, *details_block)?;
     let details = decode_replay_details(&details_bytes);
 
     let tracker_block = find_file(
@@ -111,7 +111,7 @@ pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
         &crypt_table,
     )
     .ok_or(ReplayError::MissingFile("replay.tracker.events"))?;
-    let tracker_bytes = extract_file(&bytes, offset as u32, *tracker_block)?;
+    let tracker_bytes = extract_file(bytes, offset as u32, *tracker_block)?;
     let tracker_events = decode_tracker_events(&tracker_bytes);
 
     let game_events_block = find_file(
@@ -121,7 +121,7 @@ pub fn load_replay_from_bytes(bytes: &[u8]) -> Result<Replay, ReplayError> {
         &crypt_table,
     )
     .ok_or(ReplayError::MissingFile("replay.game.events"))?;
-    let game_events_bytes = extract_file(&bytes, offset as u32, *game_events_block)?;
+    let game_events_bytes = extract_file(bytes, offset as u32, *game_events_block)?;
     let game_events = decode_game_events(&game_events_bytes)?;
 
     Ok(Replay {

@@ -224,7 +224,7 @@ mod tests {
         let bytes = [0x00, 0x04, 0x41, 0x42];
         let mut pos = 0;
 
-        let result = read_array(&bytes, &mut pos, |b, p| next_byte(b, p));
+        let result = read_array(&bytes, &mut pos, next_byte);
 
         assert_eq!(result, vec![0x41, 0x42]);
         assert_eq!(pos, 4);
@@ -236,7 +236,7 @@ mod tests {
         let bytes = [0x04, 0x01, 0x2A];
         let mut pos = 0;
 
-        let value = read_optional(&bytes, &mut pos, |b, p| next_byte(b, p));
+        let value = read_optional(&bytes, &mut pos, next_byte);
 
         assert_eq!(value, Some(0x2A));
         assert_eq!(pos, 3);
@@ -248,7 +248,7 @@ mod tests {
         let bytes = [0x04, 0x00];
         let mut pos = 0;
 
-        let value: Option<u8> = read_optional(&bytes, &mut pos, |b, p| next_byte(b, p));
+        let value: Option<u8> = read_optional(&bytes, &mut pos, next_byte);
 
         assert_eq!(value, None);
         assert_eq!(pos, 2);
@@ -283,7 +283,7 @@ mod tests {
         ];
         let mut pos = 0;
 
-        skip_value(&bytes, &mut pos);
+        skip_value(&bytes, &mut pos).expect("skips the nested-blob struct");
 
         assert_eq!(pos, bytes.len() - 1);
     }
