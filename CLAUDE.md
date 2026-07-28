@@ -15,3 +15,25 @@ StarCraft II replay protocol decoder. **Public repo, published on crates.io** �
 - `unit_tag_index` alone is never a unit identity — always `(unit_tag_index, unit_tag_recycle)`.
 - Perf: crypt table is a process-wide `OnceLock`; ~75% of load time is bzip2 decompression (inherent). Downstream loads replays in parallel — keep `load_replay` thread-safe.
 - Publishing a new version requires the owner's explicit go-ahead (irreversible).
+
+## MANDATORY: leave no garbage behind
+
+Owner's rule (2026-07-28, after the machine ran out of disk: 266 abandoned repo clones in the
+system temp dir held 268 GB, and no agent ever collected them).
+
+**Anything you generate outside the repo is yours to remove before you finish.** That covers:
+
+- **Temporary clones and copies** in the system temp dir (`/tmp`, `/private/tmp` on macOS,
+  `%TEMP%` on Windows). If you `git clone` or `cp -r` the project to try something, delete it.
+- **Git worktrees you create** — `git worktree remove` when done, and verify with
+  `git worktree list` that you left none behind.
+- **Build artifacts inside those copies**: `target`, `node_modules`, `__pycache__`. A single
+  Rust `target` runs to several GB.
+- **Docker containers, images and volumes** created for a one-off test.
+
+**Never delete blind.** If a copy or worktree has uncommitted changes, or commits that are not
+in its origin repo, keep it and tell the owner instead. Note the gitignored test fixtures under
+`tests/fixtures/` are not regenerable — never sweep those.
+
+A `SessionStart`/`SessionEnd` hook (`~/.claude/hooks/session-cleanup.sh`) sweeps whatever
+escapes, but it is deliberately conservative — a safety net, not a substitute for cleaning up.
